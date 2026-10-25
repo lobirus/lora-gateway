@@ -1,0 +1,42 @@
+{
+	admin 127.0.0.1:2019
+}
+
+{$PUBLIC_HOST} {
+	import /etc/caddy/tls.d/*.caddy
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
+	# OpenAI-compatible + Anthropic-compatible (/v1/messages) API -> LiteLLM
+	handle /v1/* {
+		reverse_proxy litellm:4000 {
+			flush_interval -1
+			transport http {
+				read_timeout 15m
+				write_timeout 15m
+			}
+		}
+	}
+
+	# Control-plane API
+	handle /api/* {
+		reverse_proxy backend:8000 {
+			flush_interval -1
+		}
+	}
+
+	# Vue SPA
+	handle {
+		root * /srv
+		@assets path /assets/*
+		header @assets Cache-Control "public, max-age=31536000, immutable"
+		try_files {path} /index.html
+		file_server
+	}
+}

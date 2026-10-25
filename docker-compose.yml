@@ -1,0 +1,124 @@
+name: lora-gateway
+
+x-restart: &restart
+  restart: unless-stopped
+
+services:
+  postgres:
+    <<: *restart
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: litellm
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:?set POSTGRES_USER in .env} -d litellm"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
+  redis:
+    <<: *restart
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks: [internal]
+
+  litellm:
+    <<: *restart
+    image: ghcr.io/berriai/litellm:main-stable
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:?set POSTGRES_USER in .env}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/litellm
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY in .env}
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:?set LITELLM_SALT_KEY in .env}
+      STORE_MODEL_IN_DB: "True"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      LITELLM_LOG: "ERROR"
+      DISABLE_ADMIN_UI: "True"
+      LITELLM_TELEMETRY: "False"
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    ports:
+      - "127.0.0.1:4000:4000"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness',timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+    networks: [internal]
+
+  backend:
+    <<: *restart
+    build: ./backend
+    image: lora-gateway-backend:latest
+    environment:
+      GATEWAY_DB_URL: postgresql+psycopg://${POSTGRES_USER:?set POSTGRES_USER in .env}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/gateway
+      LITELLM_DB_URL: postgresql+psycopg://${POSTGRES_USER:?set POSTGRES_USER in .env}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/litellm
+      LITELLM_URL: http://litellm:4000
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY in .env}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY in .env}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      SEED_TOGETHER_API_KEY: ${SEED_TOGETHER_API_KEY:-}
+      PUBLIC_HOST: ${PUBLIC_HOST:?set PUBLIC_HOST in .env (the public DNS name of this server)}
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres: { condition: service_healthy }
+      litellm: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/health/live',timeout=5)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks: [internal]
+
+  caddy:
+    <<: *restart
+    build:
+      context: .
+      dockerfile: caddy/Dockerfile
+    image: lora-gateway-caddy:latest
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:?set PUBLIC_HOST in .env (the public DNS name of this server)}
+      TLS_MODE: ${TLS_MODE:-}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      backend: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    networks: [internal]
+
+networks:
+  internal: {}
+
+volumes:
+  pgdata: {}
+  caddy_data: {}
+  caddy_config: {}

@@ -1,0 +1,33 @@
+# secrets
+.env
+.env.*
+*.env
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+
+# data / backups
+backups/
+*.sql
+*.sql.gz
+*.dump
+caddy/data/
+caddy/config/
+
+# build output / deps
+node_modules/
+dist/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.log
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
