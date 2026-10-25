@@ -8,6 +8,11 @@ interactive playground.
 Routing is done by [LiteLLM](https://github.com/BerriAI/litellm); Lora Gateway adds the control plane (FastAPI),
 the console (Vue 3) and an opinionated Docker Compose deployment with automatic HTTPS (Caddy).
 
+**Recommended client: [malac](https://github.com/lobirus/malac)**, an autonomous coding agent for the terminal (Rust,
+with a web UI and a VS Code extension). The two are built as one opinionated stack: malac does the work, and Lora
+Gateway decides which model does it, keeps the keys and tracks what it costs. Any OpenAI- or Anthropic-compatible
+client works too; see [Client configuration](#client-configuration).
+
 | Light | Dark |
 |---|---|
 | ![Dashboard, light](docs/screenshots/redesign_dashboard_light.png) | ![Dashboard, dark](docs/screenshots/redesign_dashboard_dark.png) |
@@ -92,6 +97,56 @@ The backend refuses to start if a required secret is missing or still `change-me
    levels drive the Playground's defaults and guards.
 
 ## Client configuration
+
+### malac (recommended)
+
+[malac](https://github.com/lobirus/malac) is the client Lora Gateway is designed alongside. Install it, create a
+virtual key in the console (**API keys → Create key**), then:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lobirus/malac/main/install.sh | sh
+export LORA_GATEWAY_API_KEY=sk-...        # or: printf %s "$KEY" | malac provider add lora --api-key-stdin
+```
+
+`~/.malac/config.toml`:
+
+```toml
+model = "lora/default"
+small_model = "lora/fast"
+vision_model = "lora/vision"
+
+[providers.lora]
+kind = "openai"
+base_url = "https://gateway.example.com/v1"
+api_key_env = "LORA_GATEWAY_API_KEY"
+models = ["default", "fast", "smart", "vision"]
+
+# The same gateway also speaks the Anthropic Messages API.
+[providers.lora-anthropic]
+kind = "anthropic"
+base_url = "https://gateway.example.com"
+api_key_env = "LORA_GATEWAY_API_KEY"
+models = ["default", "fast", "smart", "vision"]
+
+[profiles.fast]
+model = "lora/fast"
+
+[profiles.smart]
+model = "lora/smart"
+```
+
+```bash
+malac -y fix the failing test and verify it      # uses lora/default
+malac --profile smart review this repo           # lora/smart
+```
+
+Because malac talks to aliases (`default`, `fast`, `smart`, `vision`), switching the underlying model or provider
+is one click in the console (**Models & aliases**), with no client change. Every malac request shows up in the
+dashboard and request logs with its cost and latency. The console's **Connect** page generates this config with your
+own host and models filled in.
+
+### Other clients
+
 
 Create a virtual key in the console (the *Connect* page fills in the snippets for you) and export it:
 

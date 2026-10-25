@@ -7,6 +7,29 @@ export function buildSnippets(c: SnippetCtx): Snippet[] {
   const opencodeModels = Object.fromEntries(ms.map((m) => [m, { name: m }]))
   return [
     {
+      id: 'malac', title: 'malac (recommended)', file: '~/.malac/config.toml', lang: 'toml',
+      note: 'malac is the recommended client (github.com/lobirus/malac). Store the key once with: printf %s "$LORA_GATEWAY_API_KEY" | malac provider add lora --api-key-stdin, or keep it in the LORA_GATEWAY_API_KEY env var as below. Switch models with /model or F4.',
+      code: `model = "lora/${c.model}"
+small_model = "lora/${ms.includes('fast') ? 'fast' : c.model}"
+${ms.includes('vision') ? 'vision_model = "lora/vision"\n' : ''}
+[providers.lora]
+kind = "openai"
+base_url = "${c.openai}"
+api_key_env = "LORA_GATEWAY_API_KEY"
+models = [${ms.map((m) => `"${m}"`).join(', ')}]
+
+# The same gateway also speaks the Anthropic Messages API.
+[providers.lora-anthropic]
+kind = "anthropic"
+base_url = "${c.anthropic}"
+api_key_env = "LORA_GATEWAY_API_KEY"
+models = [${ms.map((m) => `"${m}"`).join(', ')}]
+
+[profiles.fast]
+model = "lora/${ms.includes('fast') ? 'fast' : c.model}"
+${ms.includes('smart') ? '\n[profiles.smart]\nmodel = "lora/smart"\n' : ''}`,
+    },
+    {
       id: 'opencode', title: 'OpenCode', file: '~/.config/opencode/opencode.json', lang: 'json',
       note: 'Export LORA_GATEWAY_API_KEY in your shell, then pick a model with /models (shown as "Lora Gateway").',
       code: JSON.stringify({
