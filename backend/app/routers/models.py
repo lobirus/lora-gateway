@@ -1,5 +1,6 @@
 import json
 import time
+from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -25,6 +26,11 @@ def model_out(m: Model) -> dict:
         "max_output_tokens": m.max_output_tokens, "default_max_tokens": m.default_max_tokens,
         "supports_reasoning": m.supports_reasoning, "supports_vision": m.supports_vision,
         "reasoning_efforts": m.reasoning_efforts or [],
+        "kind": m.kind or "chat", "voices": m.voices or [], "default_voice": m.default_voice,
+        "price_per_minute": m.price_per_minute, "price_per_m_chars": m.price_per_m_chars,
+        "audio_input_price_per_m": m.audio_input_price_per_m, "audio_output_price_per_m": m.audio_output_price_per_m,
+        "api_base": m.api_base, "synced": bool(m.synced), "pinned": bool(m.pinned), "available": m.available,
+        "status_note": m.status_note, "pipeline": m.provider.kind == "pipeline",
     }
 
 
@@ -51,7 +57,11 @@ def create_model(body: ModelIn, db: Session = Depends(get_db), _: User = Depends
               output_price_per_m=body.output_price_per_m, context_window=body.context_window, enabled=body.enabled,
               tags=body.tags or [], max_output_tokens=body.max_output_tokens,
               default_max_tokens=body.default_max_tokens, supports_reasoning=body.supports_reasoning,
-              supports_vision=body.supports_vision, reasoning_efforts=body.reasoning_efforts)
+              supports_vision=body.supports_vision, reasoning_efforts=body.reasoning_efforts, kind=body.kind or "chat",
+              voices=body.voices, default_voice=body.default_voice, price_per_minute=body.price_per_minute,
+              price_per_m_chars=body.price_per_m_chars, audio_input_price_per_m=body.audio_input_price_per_m,
+              audio_output_price_per_m=body.audio_output_price_per_m, api_base=body.api_base or None,
+              pinned=True if body.pinned is None else body.pinned)
     db.add(m)
     db.commit()
     db.refresh(m)
@@ -181,6 +191,54 @@ def run_test(model_name: str, prompt: str, max_tokens: int) -> dict:
             "output": "".join(text).strip()[:2000], "reasoning_chars": len("".join(reasoning)), "usage": usage, "error": err}
 
 
+SAMPLE = Path(__file__).resolve().parent.parent / "assets" / "sample.mp3"  # "Hello from the Lora gateway. The quick brown fox..."
+MASTER = lambda: {"Authorization": f"Bearer {settings.litellm_master_key}", "x-litellm-tags": "gateway-test"}  # noqa: E731
+
+
+def run_audio_test(m: Model) -> dict:
+    """Kind-specific smoke test: transcribe a bundled clip, synthesise a sentence, or open a realtime session."""
+    kind = m.kind or "chat"
+    t0 = time.perf_counter()
+    out = {"ok": False, "model": m.model_name, "latency_ms": 0, "ttft_ms": None, "output": "", "reasoning_chars": 0,
+           "usage": None, "error": None}
+    try:
+        if kind == "transcription":
+            r = httpx.post(f"{settings.litellm_url}/v1/audio/transcriptions", headers=MASTER(), timeout=120,
+                           data={"model": m.model_name}, files={"file": ("sample.mp3", SAMPLE.read_bytes(), "audio/mpeg")})
+            if r.status_code < 400:
+                out.update(ok=True, output=r.json().get("text", ""))
+            else:
+                out["error"] = f"HTTP {r.status_code}: {r.text[:400]}"
+        elif kind == "speech":
+            r = httpx.post(f"{settings.litellm_url}/v1/audio/speech", headers=MASTER(), timeout=120,
+                           json={"model": m.model_name, "input": "Hello from the Lora gateway.", "voice": m.default_voice or "alloy"})
+            if r.status_code < 400 and r.content:
+                out.update(ok=True, output=f"{len(r.content):,} bytes of {r.headers.get('content-type', 'audio')}")
+            else:
+                out["error"] = f"HTTP {r.status_code}: {r.text[:400]}"
+        elif kind == "realtime":
+            import asyncio
+            import websockets
+
+            async def probe():
+                url = settings.litellm_url.replace("http://", "ws://") + "/v1/realtime?model=" + m.model_name
+                async with websockets.connect(url, additional_headers=MASTER(), open_timeout=20) as ws:
+                    first = json.loads(await asyncio.wait_for(ws.recv(), 20))
+                    return first
+
+            first = asyncio.run(probe())
+            if first.get("type") == "session.created":
+                out.update(ok=True, output=f"session.created ({(first.get('session') or {}).get('model', m.upstream_id)})")
+            else:
+                out["error"] = json.dumps(first)[:400]
+        else:
+            return run_test(m.model_name, "Reply with exactly: pong", 64)
+    except Exception as e:  # noqa: BLE001
+        out["error"] = f"{type(e).__name__}: {e}"[:400]
+    out["latency_ms"] = round((time.perf_counter() - t0) * 1000)
+    return out
+
+
 @router.post("/models/{mid}/test")
 def test_model(mid: int, body: TestIn | None = None, db: Session = Depends(get_db), _: User = Depends(current_user)):
     m = db.get(Model, mid)
@@ -188,6 +246,8 @@ def test_model(mid: int, body: TestIn | None = None, db: Session = Depends(get_d
         raise HTTPException(404, "Model not found")
     if not deployable(m):
         raise HTTPException(400, "Model is not live (enable it and its provider, and make sure the provider has an API key)")
+    if (m.kind or "chat") in ("transcription", "speech", "realtime"):
+        return run_audio_test(m)
     body = body or TestIn()
     return run_test(m.model_name, body.prompt, body.max_tokens)
 

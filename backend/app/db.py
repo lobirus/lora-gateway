@@ -43,6 +43,10 @@ class Provider(Base):
     last_test_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_test_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     last_test_msg: Mapped[str | None] = mapped_column(Text, nullable=True)
+    auto_sync: Mapped[bool] = mapped_column(Boolean, default=True)  # daily model-list sync when enabled + key
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_sync_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    last_sync_msg: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     models: Mapped[list["Model"]] = relationship(back_populates="provider", cascade="all, delete-orphan")
@@ -67,6 +71,21 @@ class Model(Base):
     supports_vision: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # accepted Playground reasoning levels, e.g. ["off", "low", "high"]; None/[] = no control
     reasoning_efforts: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # what the model does: chat | transcription | input (chat with audio in/out) | speech | realtime | embedding
+    kind: Mapped[str | None] = mapped_column(String(16), nullable=True, default="chat")
+    voices: Mapped[list | None] = mapped_column(JSON, nullable=True)            # speech / realtime voices
+    default_voice: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    price_per_minute: Mapped[float | None] = mapped_column(Float, nullable=True)   # transcription, USD per audio minute
+    price_per_m_chars: Mapped[float | None] = mapped_column(Float, nullable=True)  # speech, USD per 1M input characters
+    audio_input_price_per_m: Mapped[float | None] = mapped_column(Float, nullable=True)   # USD per 1M audio input tokens
+    audio_output_price_per_m: Mapped[float | None] = mapped_column(Float, nullable=True)  # USD per 1M audio output tokens
+    api_base: Mapped[str | None] = mapped_column(String(300), nullable=True)  # per-model override (e.g. Fireworks audio host)
+    # catalog sync: synced = discovered from the provider's model list; pinned = shown by default (curated / starred);
+    # available = result of the last availability probe (None = not probed); status_note explains failures
+    synced: Mapped[bool] = mapped_column(Boolean, default=False)
+    pinned: Mapped[bool] = mapped_column(Boolean, default=True)
+    available: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    status_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     provider: Mapped[Provider] = relationship(back_populates="models")
@@ -80,6 +99,13 @@ class Alias(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     target: Mapped[Model | None] = relationship()
+
+
+class Meta(Base):
+    """Small key/value table (catalog version etc.)."""
+    __tablename__ = "gw_meta"
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ApiKey(Base):
@@ -107,6 +133,23 @@ _MIGRATIONS = [
     "ALTER TABLE models ADD COLUMN IF NOT EXISTS supports_reasoning BOOLEAN",
     "ALTER TABLE models ADD COLUMN IF NOT EXISTS supports_vision BOOLEAN",
     "ALTER TABLE models ADD COLUMN IF NOT EXISTS reasoning_efforts JSON",
+    "ALTER TABLE models ADD COLUMN IF NOT EXISTS kind VARCHAR(16)",
+    "ALTER TABLE models ADD COLUMN IF NOT EXISTS voices JSON",
+    "ALTER TABLE models ADD COLUMN IF NOT EXISTS default_voice VARCHAR(120)",
+    "ALTER TABLE models ADD COLUMN IF NOT EXISTS price_per_minute DOUBLE PRECISION",
+    "ALTER TABLE models ADD COLUMN IF NOT EXISTS price_per_m_chars DOUBLE PRECISION",
+    "ALTER TABLE models ADD COLUMN IF NOT EXISTS audio_input_price_per_m DOUBLE PRECISION",
+    "ALTER TABLE models ADD COLUMN IF NOT EXISTS audio_output_price_per_m DOUBLE PRECISION",
+    "UPDATE models SET kind = 'chat' WHERE kind IS NULL",
+    "ALTER TABLE models ADD COLUMN IF NOT EXISTS api_base VARCHAR(300)",
+    "ALTER TABLE models ADD COLUMN IF NOT EXISTS synced BOOLEAN NOT NULL DEFAULT FALSE",
+    "ALTER TABLE models ADD COLUMN IF NOT EXISTS pinned BOOLEAN NOT NULL DEFAULT TRUE",
+    "ALTER TABLE models ADD COLUMN IF NOT EXISTS available BOOLEAN",
+    "ALTER TABLE models ADD COLUMN IF NOT EXISTS status_note TEXT",
+    "ALTER TABLE providers ADD COLUMN IF NOT EXISTS auto_sync BOOLEAN NOT NULL DEFAULT TRUE",
+    "ALTER TABLE providers ADD COLUMN IF NOT EXISTS last_sync_at TIMESTAMPTZ",
+    "ALTER TABLE providers ADD COLUMN IF NOT EXISTS last_sync_ok BOOLEAN",
+    "ALTER TABLE providers ADD COLUMN IF NOT EXISTS last_sync_msg TEXT",
 ]
 
 

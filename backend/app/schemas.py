@@ -30,6 +30,7 @@ class ProviderPatch(BaseModel):
     api_key: str | None = None  # "" clears the key
     enabled: bool | None = None
     description: str | None = None
+    auto_sync: bool | None = None
 
 
 class ModelIn(BaseModel):
@@ -47,6 +48,15 @@ class ModelIn(BaseModel):
     supports_reasoning: bool | None = None
     supports_vision: bool | None = None
     reasoning_efforts: list[Literal["off", "low", "medium", "high"]] | None = None
+    kind: Literal["chat", "transcription", "input", "speech", "realtime", "embedding"] | None = None
+    voices: list[str] | None = Field(default=None, max_length=500)
+    default_voice: str | None = Field(default=None, max_length=120)
+    price_per_minute: float | None = Field(default=None, ge=0)
+    price_per_m_chars: float | None = Field(default=None, ge=0)
+    audio_input_price_per_m: float | None = Field(default=None, ge=0)
+    audio_output_price_per_m: float | None = Field(default=None, ge=0)
+    api_base: str | None = Field(default=None, max_length=300)
+    pinned: bool | None = None
 
 
 class ModelPatch(BaseModel):
@@ -63,6 +73,15 @@ class ModelPatch(BaseModel):
     supports_reasoning: bool | None = None
     supports_vision: bool | None = None
     reasoning_efforts: list[Literal["off", "low", "medium", "high"]] | None = None
+    kind: Literal["chat", "transcription", "input", "speech", "realtime", "embedding"] | None = None
+    voices: list[str] | None = Field(default=None, max_length=500)
+    default_voice: str | None = Field(default=None, max_length=120)
+    price_per_minute: float | None = Field(default=None, ge=0)
+    price_per_m_chars: float | None = Field(default=None, ge=0)
+    audio_input_price_per_m: float | None = Field(default=None, ge=0)
+    audio_output_price_per_m: float | None = Field(default=None, ge=0)
+    api_base: str | None = Field(default=None, max_length=300)
+    pinned: bool | None = None
 
 
 class AliasIn(BaseModel):

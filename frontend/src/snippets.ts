@@ -1,4 +1,20 @@
-export interface SnippetCtx { openai: string; anthropic: string; key: string; model: string; models: string[] }
+export interface VoiceCtx { stt?: string; tts?: string; ttsVoice?: string | null; talk?: string; talkVoice?: string | null; language?: string
+  /** audio aliases/models to declare for malac: name -> malac audio kind */
+  declare: { name: string; audio: 'transcription' | 'input' | 'speech' | 'realtime' }[] }
+export interface SnippetCtx { openai: string; anthropic: string; key: string; model: string; models: string[]; voice?: VoiceCtx }
+
+function malacVoice(v?: VoiceCtx): string {
+  if (!v || (!v.stt && !v.tts && !v.talk)) return ''
+  const lines = ['', '# Voice: dictation, read-aloud and talk mode through the gateway (docs/voice.md in malac)', '[voice]']
+  if (v.stt) lines.push('dictation = true', `dictation_model = "lora/${v.stt}"`, `language = "${v.language || 'en'}"   # remove to auto-detect`)
+  if (v.tts) lines.push('speech = true', `speech_model = "lora/${v.tts}"`, ...(v.ttsVoice ? [`speech_voice = "${v.ttsVoice}"`] : []))
+  if (v.talk) lines.push('talk = true', `talk_model = "lora/${v.talk}"`, ...(v.talkVoice ? [`talk_voice = "${v.talkVoice}"`] : []))
+  if (v.declare.length) {
+    lines.push('', "# alias names don't say what they do, so declare them")
+    for (const d of v.declare) lines.push(`[models."lora/${d.name}"]`, `audio = "${d.audio}"`)
+  }
+  return lines.join('\n') + '\n'
+}
 
 export interface Snippet { id: string; title: string; file: string; lang: string; code: string; note?: string }
 
@@ -27,7 +43,7 @@ models = [${ms.map((m) => `"${m}"`).join(', ')}]
 
 [profiles.fast]
 model = "lora/${ms.includes('fast') ? 'fast' : c.model}"
-${ms.includes('smart') ? '\n[profiles.smart]\nmodel = "lora/smart"\n' : ''}`,
+${ms.includes('smart') ? '\n[profiles.smart]\nmodel = "lora/smart"\n' : ''}${malacVoice(c.voice)}`,
     },
     {
       id: 'opencode', title: 'OpenCode', file: '~/.config/opencode/opencode.json', lang: 'json',
@@ -144,6 +160,53 @@ curl ${c.anthropic}/v1/messages \\
 
 # List models available to this key
 curl ${c.openai}/models -H "Authorization: Bearer ${c.key}"`,
+    },
+    {
+      id: 'audio', title: 'Audio (curl)', file: 'shell', lang: 'bash',
+      note: 'Transcription takes multipart uploads up to 25 MB; speech streams audio back. Realtime voice is a WebSocket at /v1/realtime?model=' + (c.voice?.talk || 'talk') + ' (OpenAI Realtime protocol).',
+      code: `# Speech to text (Whisper-style, multipart)
+curl ${c.openai}/audio/transcriptions \\
+  -H "Authorization: Bearer ${c.key}" \\
+  -F model=${c.voice?.stt || 'stt'} -F file=@recording.mp3${c.voice?.language ? ' -F language=' + c.voice.language : ''}
+
+# Translate speech to English text
+curl ${c.openai}/audio/translations \\
+  -H "Authorization: Bearer ${c.key}" \\
+  -F model=${c.voice?.stt || 'stt'} -F file=@recording.mp3
+
+# Text to speech (streams MP3)
+curl ${c.openai}/audio/speech \\
+  -H "Authorization: Bearer ${c.key}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"model": "${c.voice?.tts || 'tts'}", "input": "Hello from the gateway!", "voice": "${c.voice?.ttsVoice || 'alloy'}", "response_format": "mp3"}' \\
+  --output speech.mp3`,
+    },
+    {
+      id: 'realtime', title: 'Realtime (Python)', file: 'talk.py', lang: 'python',
+      note: 'The OpenAI SDK connects to wss://<host>/v1/realtime. The open-weight alias "' + (c.voice?.talk || 'talk') + '" runs Whisper → chat model → TTS on the gateway; OpenAI realtime models are relayed. Audio is PCM16 mono 24 kHz, base64 in input_audio_buffer.append / response.output_audio.delta.',
+      code: `import asyncio, base64
+from openai import AsyncOpenAI
+
+client = AsyncOpenAI(base_url="${c.openai}", api_key="${c.key}")
+
+async def main():
+    async with client.realtime.connect(model="${c.voice?.talk || 'talk'}") as conn:
+        await conn.session.update(session={"type": "realtime", "instructions": "Be brief.",
+                                           "audio": {"output": {"voice": "${c.voice?.talkVoice || 'marin'}"}}})
+        await conn.conversation.item.create(item={"type": "message", "role": "user",
+                                                  "content": [{"type": "input_text", "text": "Say hello!"}]})
+        await conn.response.create()
+        pcm = bytearray()
+        async for event in conn:
+            if event.type == "response.output_audio.delta":
+                pcm += base64.b64decode(event.delta)
+            elif event.type == "response.output_audio_transcript.delta":
+                print(event.delta, end="", flush=True)
+            elif event.type == "response.done":
+                break
+        print(f"\\n{len(pcm) / 48000:.1f} s of 24 kHz PCM16 audio")
+
+asyncio.run(main())`,
     },
   ]
 }

@@ -9,6 +9,13 @@ export interface PgModel {
   max_output_tokens: number; default_max_tokens: number
   /** reasoning levels the model honours ([] = no control) */
   reasoning_efforts: Effort[]
+  /** what the model does (Models page "kind"): chat | transcription | input | speech | realtime | embedding */
+  audio: 'chat' | 'transcription' | 'input' | 'speech' | 'realtime' | 'embedding'
+  voices: string[]; default_voice: string | null
+  price_per_minute: number | null; price_per_m_chars: number | null
+  audio_input_price_per_m: number | null; audio_output_price_per_m: number | null
+  /** shown by default in pickers (curated / starred); synced catalog models appear when searching */
+  pinned: boolean; synced: boolean
 }
 export type Effort = 'off' | 'low' | 'medium' | 'high'
 export type EffortParam = 'default' | Effort

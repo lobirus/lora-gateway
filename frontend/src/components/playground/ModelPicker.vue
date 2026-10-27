@@ -16,7 +16,9 @@ const current = computed(() => props.models.find((m) => m.name === props.modelVa
 const reason = (m: PgModel) => (m.live ? '' : !m.provider_name ? 'No target' : !m.provider_enabled ? 'Provider disabled' : !m.enabled ? 'Model disabled' : 'No API key')
 const groups = computed(() => {
   const s = q.value.trim().toLowerCase()
-  const match = (m: PgModel) => !s || [m.name, m.display_name, m.target, m.upstream_id, m.provider_name].some((x) => x?.toLowerCase().includes(s))
+  // chat pickers list chat-capable models only; synced catalog models stay hidden until you search
+  const chatty = (m: PgModel) => m.audio === 'chat' || m.audio === 'input' || !m.audio
+  const match = (m: PgModel) => chatty(m) && (s ? [m.name, m.display_name, m.target, m.upstream_id, m.provider_name].some((x) => x?.toLowerCase().includes(s)) : (m.pinned || m.name === props.modelValue))
   const out: { label: string; items: PgModel[] }[] = []
   const al = props.models.filter((m) => m.kind === 'alias' && match(m))
   if (al.length) out.push({ label: 'Aliases', items: al })
@@ -27,6 +29,7 @@ const groups = computed(() => {
   for (const [label, items] of entries) out.push({ label, items: [...items].sort((a, b) => Number(b.live) - Number(a.live)) })
   return out
 })
+const hiddenCount = computed(() => props.models.filter((m) => !m.pinned && m.live && (m.audio === 'chat' || m.audio === 'input')).length)
 const flat = computed(() => groups.value.flatMap((g) => g.items).filter((m) => m.live))
 
 const active = ref(0)
@@ -95,6 +98,7 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDoc))
           </button>
         </div>
         <div v-if="!groups.length" class="none muted">No models match “{{ q }}”</div>
+        <div v-if="!q.trim() && hiddenCount" class="none muted more-hint">{{ hiddenCount }} more catalog models — type to search</div>
       </div>
     </div>
   </div>
@@ -129,6 +133,7 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDoc))
 .off-b { height: 20px; font-size: 10.5px; }
 .ck { color: var(--primary); flex-shrink: 0; }
 .none { padding: 18px; text-align: center; font-size: 13px; }
+.more-hint { padding: 10px 18px 6px; font-size: 12px; border-top: 1px solid var(--border); margin-top: 4px; }
 @media (max-width: 600px) { .tgt, .prov { display: none; } }
 @keyframes pop { from { opacity: 0; transform: translateY(-4px); } }
 </style>

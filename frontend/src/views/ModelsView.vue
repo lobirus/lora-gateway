@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { Plus, Play, Pencil, Trash2, Loader2, Search, ArrowRightLeft, Boxes, Star, Zap, Brain, Eye, Tag, CheckCircle2, XCircle, CloudDownload } from 'lucide-vue-next'
+import { Plus, Play, Pencil, Trash2, Loader2, Search, ArrowRightLeft, Boxes, Star, Zap, Brain, Eye, Tag, CheckCircle2, XCircle, CloudDownload, Mic, Volume2, Headphones, RefreshCw, ChevronLeft, ChevronRight, AudioLines } from 'lucide-vue-next'
 import { api } from '../api'
-import type { Alias, Model, Provider, TestResult } from '../types'
-import { fmtCtx, fmtMs, fmtPrice } from '../format'
+import type { Alias, Model, ModelKind, Provider, TestResult } from '../types'
+import { KIND_LABELS } from '../types'
+import { fmtCtx, fmtInt, fmtMs, fmtPrice } from '../format'
 import { ok, fail, toast } from '../stores/toast'
 import Modal from '../components/Modal.vue'
 import Toggle from '../components/Toggle.vue'
@@ -19,6 +20,11 @@ const loading = ref(true)
 const q = ref('')
 const prov = ref((route.query.provider as string) || '')
 const onlyLive = ref(false)
+const kindF = ref((route.query.kind as string) || '')
+const capF = ref('')
+const view = ref<'pinned' | 'all'>((localStorage.getItem('gw-models-view') as 'pinned' | 'all') || 'pinned')
+const page = ref(0)
+const PAGE = 50
 
 async function load() {
   try {
@@ -28,9 +34,46 @@ async function load() {
 }
 onMounted(load)
 
-const filtered = computed(() => models.value.filter((m) =>
-  (!prov.value || m.provider_slug === prov.value) && (!onlyLive.value || m.live) &&
-  (!q.value || (m.model_name + m.upstream_id + m.display_name).toLowerCase().includes(q.value.toLowerCase()))))
+const AUDIO_KINDS = ['transcription', 'speech', 'realtime', 'input']
+const filtered = computed(() => {
+  const s = q.value.trim().toLowerCase()
+  return models.value.filter((m) =>
+    // "Pinned" shows curated + starred models; searching or filtering by provider/kind searches the whole catalog
+    (view.value === 'all' || m.pinned || !!s || !!prov.value || !!kindF.value) &&
+    (!prov.value || m.provider_slug === prov.value) && (!onlyLive.value || m.live) &&
+    (!kindF.value || (kindF.value === 'audio' ? AUDIO_KINDS.includes(m.kind) : m.kind === kindF.value)) &&
+    (!capF.value || (capF.value === 'vision' ? m.supports_vision : capF.value === 'reasoning' ? m.supports_reasoning : capF.value === 'unavailable' ? m.available === false : capF.value === 'synced' ? m.synced : !m.synced)) &&
+    (!s || (m.model_name + ' ' + m.upstream_id + ' ' + m.display_name + ' ' + m.provider_name).toLowerCase().includes(s)))
+})
+watch([q, prov, onlyLive, kindF, capF, view], () => { page.value = 0 })
+watch(view, (v) => localStorage.setItem('gw-models-view', v))
+const pages = computed(() => Math.max(1, Math.ceil(filtered.value.length / PAGE)))
+const paged = computed(() => filtered.value.slice(page.value * PAGE, page.value * PAGE + PAGE))
+const hiddenCount = computed(() => models.value.filter((m) => !m.pinned).length)
+const kindIcon: Record<string, unknown> = { transcription: Mic, speech: Volume2, realtime: Headphones, input: AudioLines }
+const fmtMin = (n: number | null) => (n == null ? '—' : '$' + (n < 0.01 ? n.toFixed(5).replace(/0+$/, '') : n.toFixed(3)))
+function priceCells(m: Model): [string, string, string] {
+  if (m.pipeline) return ['per step', '', 'Speech-to-text, chat and text-to-speech are each billed and logged at their own prices']
+  if (m.kind === 'transcription') return [fmtMin(m.price_per_minute), '', 'per audio minute']
+  if (m.kind === 'speech') return [m.price_per_m_chars != null ? fmtPrice(m.price_per_m_chars) : '—', '', 'per 1M characters']
+  return [fmtPrice(m.input_price_per_m), fmtPrice(m.output_price_per_m), m.kind === 'realtime' || m.kind === 'input' ? 'text tokens; audio ' + fmtPrice(m.audio_input_price_per_m) + ' / ' + fmtPrice(m.audio_output_price_per_m) + ' per 1M' : 'per 1M tokens']
+}
+async function togglePin(m: Model) {
+  try { await api.patch(`/api/models/${m.id}`, { pinned: !m.pinned }); m.pinned = !m.pinned } catch (e) { fail('Update failed', e) }
+}
+const syncing = ref(false)
+async function syncCatalogs() {
+  syncing.value = true
+  try {
+    const active = providers.value.filter((p) => p.status === 'active' && p.can_sync && p.auto_sync)
+    for (const p of active) {
+      const r = await api.post<{ ok: boolean; message?: string; error?: string }>(`/api/providers/${p.id}/sync`)
+      toast(r.ok ? 'success' : 'error', p.name + (r.ok ? ' synced' : ' sync failed'), r.message || r.error)
+    }
+    if (!active.length) toast('info', 'Nothing to sync', 'No active provider has catalog sync turned on.')
+    await load()
+  } catch (e) { fail('Sync failed', e) } finally { syncing.value = false }
+}
 const liveModels = computed(() => models.value.filter((m) => m.live))
 const aliasIcon: Record<string, unknown> = { default: Star, fast: Zap, smart: Brain, vision: Eye }
 
@@ -77,7 +120,7 @@ async function testModel(m: Model) {
   } catch (e) { fail('Test failed', e) } finally { delete busy[m.id] }
 }
 async function testAll() {
-  for (const m of filtered.value.filter((x) => x.live)) await testModel(m)
+  for (const m of paged.value.filter((x) => x.live)) await testModel(m)
 }
 
 const editing = ref<Model | null>(null)
@@ -85,7 +128,13 @@ const creating = ref(false)
 type Tri = 'auto' | 'yes' | 'no'
 const EFFORTS = ['off', 'low', 'medium', 'high'] as const
 const form = reactive({ provider_id: 0, model_name: '', upstream_id: '', display_name: '', input_price_per_m: 0, output_price_per_m: 0, context_window: null as number | null, enabled: true,
-  max_output_tokens: null as number | null, default_max_tokens: null as number | null, reasoning: 'auto' as Tri, vision: 'auto' as Tri, reasoning_efforts: [] as Model['reasoning_efforts'] })
+  max_output_tokens: null as number | null, default_max_tokens: null as number | null, reasoning: 'auto' as Tri, vision: 'auto' as Tri, reasoning_efforts: [] as Model['reasoning_efforts'],
+  kind: 'chat' as ModelKind, voices: '', default_voice: '', price_per_minute: null as number | null, price_per_m_chars: null as number | null,
+  audio_input_price_per_m: null as number | null, audio_output_price_per_m: null as number | null, api_base: '', pinned: true })
+const numOrNull = (v: unknown) => (v === '' || v == null || !Number.isFinite(+v) ? null : +v)
+const audioPayload = () => ({ kind: form.kind, voices: form.voices.split(/[\n,]/).map((v) => v.trim()).filter(Boolean), default_voice: form.default_voice.trim() || null,
+  price_per_minute: numOrNull(form.price_per_minute), price_per_m_chars: numOrNull(form.price_per_m_chars),
+  audio_input_price_per_m: numOrNull(form.audio_input_price_per_m), audio_output_price_per_m: numOrNull(form.audio_output_price_per_m), api_base: form.api_base.trim() || null, pinned: form.pinned })
 const toTri = (v: boolean | null | undefined): Tri => (v === true ? 'yes' : v === false ? 'no' : 'auto')
 const fromTri = (v: Tri) => (v === 'yes' ? true : v === 'no' ? false : null)
 const intOrNull = (v: unknown) => { const n = parseInt(String(v ?? '').replace(/[\s,.]/g, ''), 10); return Number.isFinite(n) && n > 0 ? n : null }
@@ -98,14 +147,17 @@ function toggleEffort(e: (typeof EFFORTS)[number]) {
 function openEdit(m: Model) {
   editing.value = m
   Object.assign(form, { provider_id: m.provider_id, model_name: m.model_name, upstream_id: m.upstream_id, display_name: m.display_name, input_price_per_m: m.input_price_per_m, output_price_per_m: m.output_price_per_m, context_window: m.context_window, enabled: m.enabled,
-    max_output_tokens: m.max_output_tokens, default_max_tokens: m.default_max_tokens, reasoning: toTri(m.supports_reasoning), vision: toTri(m.supports_vision), reasoning_efforts: [...(m.reasoning_efforts || [])] })
+    max_output_tokens: m.max_output_tokens, default_max_tokens: m.default_max_tokens, reasoning: toTri(m.supports_reasoning), vision: toTri(m.supports_vision), reasoning_efforts: [...(m.reasoning_efforts || [])],
+    kind: m.kind || 'chat', voices: (m.voices || []).join(', '), default_voice: m.default_voice || '', price_per_minute: m.price_per_minute, price_per_m_chars: m.price_per_m_chars,
+    audio_input_price_per_m: m.audio_input_price_per_m, audio_output_price_per_m: m.audio_output_price_per_m, api_base: m.api_base || '', pinned: m.pinned })
 }
 function openCreate() {
   creating.value = true
   upstream.value = []
   const p = providers.value.find((x) => x.slug === prov.value) || providers.value.find((x) => x.status === 'active') || providers.value[0]
   Object.assign(form, { provider_id: p?.id || 0, model_name: '', upstream_id: '', display_name: '', input_price_per_m: 0, output_price_per_m: 0, context_window: null, enabled: true,
-    max_output_tokens: null, default_max_tokens: null, reasoning: 'auto', vision: 'auto', reasoning_efforts: [] })
+    max_output_tokens: null, default_max_tokens: null, reasoning: 'auto', vision: 'auto', reasoning_efforts: [],
+    kind: (kindF.value && kindF.value !== 'audio' ? kindF.value : 'chat') as ModelKind, voices: '', default_voice: '', price_per_minute: null, price_per_m_chars: null, audio_input_price_per_m: null, audio_output_price_per_m: null, api_base: '', pinned: true })
 }
 function close() { editing.value = null; creating.value = false }
 const saving = ref(false)
@@ -113,11 +165,11 @@ async function save() {
   saving.value = true
   try {
     if (editing.value) {
-      const r = await api.patch<{ sync: { ok: boolean } }>(`/api/models/${editing.value.id}`, { model_name: form.model_name, upstream_id: form.upstream_id, display_name: form.display_name, input_price_per_m: +form.input_price_per_m, output_price_per_m: +form.output_price_per_m, context_window: form.context_window ? +form.context_window : null, enabled: form.enabled, ...capsPayload() })
+      const r = await api.patch<{ sync: { ok: boolean } }>(`/api/models/${editing.value.id}`, { model_name: form.model_name, upstream_id: form.upstream_id, display_name: form.display_name, input_price_per_m: +form.input_price_per_m, output_price_per_m: +form.output_price_per_m, context_window: form.context_window ? +form.context_window : null, enabled: form.enabled, ...capsPayload(), ...audioPayload() })
       syncNote(r.sync); ok('Model updated', 'Pricing applies to new requests')
     } else {
-      const { reasoning: _r, vision: _v, ...base } = form
-      const r = await api.post<{ sync: { ok: boolean } }>('/api/models', { ...base, input_price_per_m: +form.input_price_per_m, output_price_per_m: +form.output_price_per_m, context_window: form.context_window ? +form.context_window : null, ...capsPayload() })
+      const { reasoning: _r, vision: _v, voices: _vo, default_voice: _dv, api_base: _ab, ...base } = form
+      const r = await api.post<{ sync: { ok: boolean } }>('/api/models', { ...base, input_price_per_m: +form.input_price_per_m, output_price_per_m: +form.output_price_per_m, context_window: form.context_window ? +form.context_window : null, ...capsPayload(), ...audioPayload() })
       syncNote(r.sync); ok('Model added')
     }
     close(); await load()
@@ -153,9 +205,10 @@ function pick(u: Up) {
     <div class="page-header">
       <div>
         <h1>Models &amp; aliases</h1>
-        <p>Point stable aliases at any model in one click. Prices drive cost tracking (USD per 1M tokens).</p>
+        <p>Point stable aliases at any model in one click. Prices drive cost tracking: per 1M tokens for chat, per audio minute for transcription, per 1M characters for speech.</p>
       </div>
       <div class="toolbar">
+        <button class="btn" :disabled="syncing" title="Import every model the active providers serve (prices, kinds, context)" @click="syncCatalogs"><Loader2 v-if="syncing" class="spin" /><RefreshCw v-else /> Sync catalogs</button>
         <button class="btn" @click="showAlias = true; Object.assign(aliasForm, { name: '', target_model_id: liveModels[0]?.id || 0, description: '' })"><Tag /> New alias</button>
         <button class="btn btn-primary" @click="openCreate"><Plus /> Add model</button>
       </div>
@@ -175,43 +228,50 @@ function pick(u: Up) {
           <select class="input" :aria-label="'Model for alias ' + a.name" :value="a.target_model_id ?? ''" :disabled="aliasBusy[a.id]" @change="switchAlias(a, +($event.target as HTMLSelectElement).value)">
             <option v-if="!a.target_model_id" value="">— choose a model —</option>
             <optgroup v-for="p in providers.filter((p) => models.some((m) => m.provider_id === p.id))" :key="p.id" :label="p.name + (p.status === 'active' ? '' : ' (inactive)')">
-              <option v-for="m in models.filter((m) => m.provider_id === p.id)" :key="m.id" :value="m.id" :disabled="!m.live">{{ m.display_name }}</option>
+              <option v-for="m in models.filter((m) => m.provider_id === p.id && (m.pinned || m.id === a.target_model_id) && (a.target ? (m.kind === a.target.kind || (a.target.kind === 'chat' && m.kind === 'input')) : true))" :key="m.id" :value="m.id" :disabled="!m.live">{{ m.display_name }}</option>
             </optgroup>
           </select>
           <Loader2 v-if="aliasBusy[a.id]" class="spin" :size="16" />
           <button class="btn btn-ghost btn-icon btn-sm" title="Delete alias" :aria-label="'Delete alias ' + a.name" @click="deleteAlias(a)"><Trash2 /></button>
         </div>
-        <div v-if="a.target" class="atarget muted">{{ a.target.provider_name }} · {{ fmtPrice(a.target.input_price_per_m) }} in / {{ fmtPrice(a.target.output_price_per_m) }} out</div>
+        <div v-if="a.target" class="atarget muted"><span v-if="a.target.kind !== 'chat'" class="kind-b">{{ KIND_LABELS[a.target.kind] }}</span>{{ a.target.provider_name }} · <template v-if="a.target.pipeline">STT → chat → TTS, billed per step</template><template v-else-if="a.target.kind === 'transcription' || a.target.kind === 'speech'">{{ priceCells(a.target)[0] }} {{ priceCells(a.target)[2] }}</template><template v-else>{{ fmtPrice(a.target.input_price_per_m) }} in / {{ fmtPrice(a.target.output_price_per_m) }} out</template><template v-if="a.target.default_voice"> · voice {{ a.target.default_voice }}</template></div>
       </div>
     </div>
 
     <div class="card" style="margin-top: 24px">
       <div class="card-header">
-        <div><h3>Model catalog</h3><div class="sub">{{ liveModels.length }} live of {{ models.length }} configured</div></div>
-        <div class="toolbar">
-          <div class="search"><Search :size="14" /><input v-model="q" class="input" placeholder="Search models" /></div>
-          <select v-model="prov" class="input" style="width: 170px"><option value="">All providers</option><option v-for="p in providers" :key="p.id" :value="p.slug">{{ p.name }}</option></select>
-          <label class="row" style="gap: 8px; font-size: 13px"><Toggle v-model="onlyLive" /> Live only</label>
-          <button class="btn btn-sm" @click="testAll"><Play /> Test all live</button>
+        <div><h3>Model catalog</h3><div class="sub">{{ fmtInt(liveModels.length) }} live of {{ fmtInt(models.length) }} · {{ fmtInt(filtered.length) }} shown</div></div>
+        <div class="toolbar filters">
+          <div class="segmented" role="group" aria-label="Which models"><button :class="{ active: view === 'pinned' }" :aria-pressed="view === 'pinned'" @click="view = 'pinned'"><Star :size="13" /> Pinned</button><button :class="{ active: view === 'all' }" :aria-pressed="view === 'all'" @click="view = 'all'">All {{ fmtInt(models.length) }}</button></div>
+          <div class="search"><Search :size="14" /><input v-model="q" class="input" placeholder="Search all models" aria-label="Search models" /></div>
+          <select v-model="prov" class="input" aria-label="Provider"><option value="">All providers</option><option v-for="p in providers.filter((p) => p.model_count)" :key="p.id" :value="p.slug">{{ p.name }}</option></select>
+          <select v-model="kindF" class="input" aria-label="Kind"><option value="">All kinds</option><option value="chat">Chat</option><option value="audio">Audio (all)</option><option value="transcription">Transcription</option><option value="speech">Speech</option><option value="realtime">Realtime</option><option value="input">Audio chat</option><option value="embedding">Embedding</option></select>
+          <select v-model="capF" class="input" aria-label="Capability"><option value="">Any capability</option><option value="vision">Vision</option><option value="reasoning">Reasoning</option><option value="curated">Curated</option><option value="synced">Synced</option><option value="unavailable">Unavailable</option></select>
+          <label class="row" style="gap: 8px; font-size: 13px"><Toggle v-model="onlyLive" aria-label="Live only" /> Live only</label>
+          <button class="btn btn-sm" @click="testAll"><Play /> Test shown</button>
         </div>
       </div>
       <div v-if="loading" class="card-body"><div v-for="i in 5" :key="i" class="skeleton" style="height: 36px; margin-bottom: 8px" /></div>
       <EmptyState v-else-if="!filtered.length" :icon="Boxes" title="No models match" description="Try a different filter or add a model." />
       <div v-else class="table-wrap">
         <table class="table">
-          <thead><tr><th>Model</th><th>Provider</th><th>Upstream ID</th><th class="num">Input / 1M</th><th class="num">Output / 1M</th><th class="num">Context</th><th>Status</th><th>Last test</th><th style="width: 1%"></th></tr></thead>
+          <thead><tr><th style="width: 1%"></th><th>Model</th><th>Kind</th><th>Provider</th><th>Upstream ID</th><th class="num">Input</th><th class="num">Output</th><th class="num">Context</th><th>Status</th><th>Last test</th><th style="width: 1%"></th></tr></thead>
           <tbody>
-            <tr v-for="m in filtered" :key="m.id">
+            <tr v-for="m in paged" :key="m.id">
+              <td><button class="pin" :class="{ on: m.pinned }" :aria-pressed="m.pinned" :aria-label="(m.pinned ? 'Unpin ' : 'Pin ') + m.model_name" :title="m.pinned ? 'Pinned: shown by default' : 'Pin to show by default'" @click="togglePin(m)"><Star :size="14" /></button></td>
               <td><div class="mname clip" :title="m.display_name">{{ m.display_name }}</div><div class="row" style="gap: 4px"><span class="mono muted clip" :title="m.model_name">{{ m.model_name }}</span><CopyButton :text="m.model_name" class="tiny" /></div></td>
-              <td>{{ m.provider_name }}</td>
-              <td class="mono muted" style="max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap" :title="m.upstream_id">{{ m.upstream_id }}</td>
-              <td class="num">{{ fmtPrice(m.input_price_per_m) }}</td>
-              <td class="num">{{ fmtPrice(m.output_price_per_m) }}</td>
+              <td><span class="kind" :title="m.kind === 'realtime' && m.pipeline ? 'Served by the gateway voice pipeline' : ''"><component :is="kindIcon[m.kind]" v-if="kindIcon[m.kind]" :size="13" />{{ KIND_LABELS[m.kind] || m.kind }}</span>
+                <div class="caps"><Eye v-if="m.supports_vision" :size="12" title="Vision" /><Brain v-if="m.supports_reasoning" :size="12" title="Reasoning" /><span v-if="m.voices?.length" class="muted" :title="m.voices.join(', ')">{{ m.voices.length }} voices</span></div></td>
+              <td class="clip-cell" :title="m.provider_name">{{ m.provider_name }}</td>
+              <td class="mono muted" style="max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap" :title="m.upstream_id">{{ m.upstream_id }}</td>
+              <td class="num" :title="priceCells(m)[2]">{{ priceCells(m)[0] }}<div v-if="m.kind === 'transcription' || m.kind === 'speech'" class="unit">{{ m.kind === 'transcription' ? '/ min' : '/ 1M chars' }}</div></td>
+              <td class="num" :title="priceCells(m)[2]">{{ priceCells(m)[1] || '' }}<div v-if="(m.kind === 'realtime' || m.kind === 'input') && !m.pipeline" class="unit">audio {{ fmtPrice(m.audio_input_price_per_m) }} / {{ fmtPrice(m.audio_output_price_per_m) }}</div></td>
               <td class="num">{{ fmtCtx(m.context_window) }}</td>
               <td>
                 <div class="row" style="gap: 8px">
                   <Toggle :model-value="m.enabled" :disabled="!!busy[m.id]" :aria-label="'Enable ' + m.display_name" @update:model-value="(v: boolean) => toggleModel(m, v)" />
                   <span v-if="m.live" class="badge badge-success">Live</span>
+                  <span v-else-if="m.available === false" class="badge badge-warning" :title="m.status_note || ''">Unavailable</span>
                   <span v-else-if="m.enabled && !m.provider_enabled" class="badge" title="Provider disabled or missing API key">Provider off</span>
                   <span v-else class="badge">Off</span>
                 </div>
@@ -231,6 +291,13 @@ function pick(u: Up) {
             </tr>
           </tbody>
         </table>
+      </div>
+      <div v-if="!loading && filtered.length" class="pager">
+        <span class="muted">{{ view === 'pinned' && !q && !prov && !kindF ? fmtInt(hiddenCount) + ' synced catalog models hidden — search, filter or show All' : '' }}</span>
+        <span class="spacer" />
+        <span class="muted">Page {{ page + 1 }} of {{ pages }}</span>
+        <button class="btn btn-sm btn-icon" :disabled="page === 0" aria-label="Previous page" @click="page--"><ChevronLeft /></button>
+        <button class="btn btn-sm btn-icon" :disabled="page + 1 >= pages" aria-label="Next page" @click="page++"><ChevronRight /></button>
       </div>
     </div>
 
@@ -257,6 +324,30 @@ function pick(u: Up) {
         </div>
         <div class="field"><label>Display name</label><input v-model="form.display_name" class="input" /></div>
         <div class="grid-2">
+          <div class="field"><label>Kind</label>
+            <select v-model="form.kind" class="input"><option v-for="(l, k) in KIND_LABELS" :key="k" :value="k">{{ l }}</option></select>
+            <span class="hint">Sets LiteLLM's mode ({{ ({ chat: 'chat', input: 'chat', transcription: 'audio_transcription', speech: 'audio_speech', realtime: 'realtime', embedding: 'embedding' } as Record<string, string>)[form.kind] }}) so clients can detect audio models</span></div>
+          <div class="field"><label>Pinned</label><Toggle v-model="form.pinned" /><span class="hint">Shown by default in pickers and here</span></div>
+        </div>
+        <div v-if="form.kind === 'transcription'" class="grid-2">
+          <div class="field"><label>Price (USD / audio minute)</label><input v-model="form.price_per_minute" type="number" step="0.0001" min="0" class="input" /></div>
+          <div class="field"><label>API base override</label><input v-model="form.api_base" class="input mono" placeholder="provider default" /><span class="hint">Some providers host audio elsewhere</span></div>
+        </div>
+        <template v-if="form.kind === 'speech' || form.kind === 'realtime' || form.kind === 'input'">
+          <div v-if="form.kind === 'speech'" class="grid-2">
+            <div class="field"><label>Price (USD / 1M characters)</label><input v-model="form.price_per_m_chars" type="number" step="0.01" min="0" class="input" /></div>
+            <div class="field"><label>API base override</label><input v-model="form.api_base" class="input mono" placeholder="provider default" /></div>
+          </div>
+          <div v-else class="grid-2">
+            <div class="field"><label>Audio input (USD / 1M audio tokens)</label><input v-model="form.audio_input_price_per_m" type="number" step="0.01" min="0" class="input" /></div>
+            <div class="field"><label>Audio output (USD / 1M audio tokens)</label><input v-model="form.audio_output_price_per_m" type="number" step="0.01" min="0" class="input" /></div>
+          </div>
+          <div class="grid-2">
+            <div class="field"><label>Voices</label><textarea v-model="form.voices" class="input" rows="2" placeholder="alloy, coral, marin" /><span class="hint">Comma or newline separated</span></div>
+            <div class="field"><label>Default voice</label><input v-model="form.default_voice" class="input" /></div>
+          </div>
+        </template>
+        <div v-if="form.kind !== 'transcription' && form.kind !== 'speech'" class="grid-2">
           <div class="field"><label>Input price (USD / 1M tokens)</label><input v-model="form.input_price_per_m" type="number" step="0.0001" min="0" class="input" /></div>
           <div class="field"><label>Output price (USD / 1M tokens)</label><input v-model="form.output_price_per_m" type="number" step="0.0001" min="0" class="input" /></div>
         </div>
@@ -308,6 +399,21 @@ function pick(u: Up) {
 .aname .muted { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .atarget { font-size: 12px; margin-top: 8px; }
 .mname { font-weight: 500; }
+.pin { border: 0; background: transparent; color: var(--text-3); cursor: pointer; width: 24px; height: 24px; display: grid; place-items: center; border-radius: var(--radius-sm); }
+.pin:hover { color: var(--text); background: var(--bg-hover); }
+.pin.on { color: var(--text); }
+.pin.on :deep(svg) { fill: currentColor; }
+.pin:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.kind { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; white-space: nowrap; }
+.kind svg { color: var(--text-3); }
+.caps { display: flex; gap: 6px; align-items: center; color: var(--text-3); font-size: 11px; margin-top: 2px; min-height: 12px; }
+.unit { font-size: 10.5px; color: var(--text-3); white-space: nowrap; }
+.clip-cell { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kind-b { display: inline-block; border: 1px solid var(--border); border-radius: 3px; padding: 0 5px; margin-right: 6px; font-size: 11px; color: var(--text-2); }
+.filters { flex-wrap: wrap; justify-content: flex-end; }
+.filters select.input { width: auto; min-width: 130px; }
+.pager { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); font-size: 13px; }
+.card-header { flex-wrap: wrap; gap: 12px; }
 .clip { display: block; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .search { position: relative; }
 .search svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); pointer-events: none; color: var(--text-3); }

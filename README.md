@@ -1,9 +1,11 @@
 # Lora Gateway
 
 **One self-hosted endpoint for every LLM.** Lora Gateway puts a single OpenAI-compatible *and* Anthropic-compatible
-API in front of Together AI, Z.ai, OpenRouter, Anthropic, OpenAI, xAI and any other OpenAI-compatible service, and
-adds a web console for providers, models, aliases, virtual API keys, budgets, request logs, cost analytics and an
-interactive playground.
+API in front of Together AI, OpenAI, OpenRouter, Vercel AI Gateway, Groq, DeepInfra, Fireworks, Mistral, Gemini,
+DeepSeek, Cerebras, SambaNova, Hyperbolic, Nebius, Novita, Baseten, Anthropic, xAI, Z.ai and any other OpenAI-compatible
+service (Ollama, vLLM …), and adds a web console for providers, full model-catalog sync, aliases, virtual API keys,
+budgets, request logs, cost analytics, an interactive playground, and voice: speech-to-text, text-to-speech and
+realtime conversations over the OpenAI Realtime API, with an open-weight default pipeline.
 
 Routing is done by [LiteLLM](https://github.com/BerriAI/litellm); Lora Gateway adds the control plane (FastAPI),
 the console (Vue 3) and an opinionated Docker Compose deployment with automatic HTTPS (Caddy).
@@ -19,6 +21,8 @@ client works too; see [Client configuration](#client-configuration).
 | ![Playground, light](docs/screenshots/redesign_playground_light.png) | ![Playground, dark](docs/screenshots/redesign_playground_dark.png) |
 | ![Models, light](docs/screenshots/redesign_models_light.png) | ![Models, dark](docs/screenshots/redesign_models_dark.png) |
 | ![Login, light](docs/screenshots/redesign_login_light.png) | ![Login, dark](docs/screenshots/redesign_login_dark.png) |
+| ![Voice: talk, light](docs/screenshots/voice_tab_talk_light.png) | ![Voice: talk, dark](docs/screenshots/voice_tab_talk_dark.png) |
+| ![Voice: speech to text, light](docs/screenshots/voice_tab_stt_light.png) | ![Voice: text to speech, dark](docs/screenshots/voice_tab_tts_dark.png) |
 
 ## Features
 
@@ -35,6 +39,14 @@ client works too; see [Client configuration](#client-configuration).
 * **Playground** — streaming chat with Markdown/code rendering, reasoning display, image input with vision guard,
   side-by-side compare of up to 3 models, OpenAI vs Anthropic format, per-response metrics, and *View code* to copy
   the request as curl / Python / JavaScript.
+* **Voice** — `/v1/audio/transcriptions`, `/v1/audio/translations`, `/v1/audio/speech` and the realtime WebSocket
+  `/v1/realtime` with the same keys, budgets and logs. The default `stt` / `tts` / `talk` aliases are open-weight
+  (Whisper, Kokoro, and a gateway-side Realtime pipeline: Whisper → chat model → Kokoro); OpenAI `gpt-realtime`,
+  `gpt-4o-mini-transcribe` and `gpt-4o-mini-tts` are ready as alternatives. Playground dictation, read-aloud and a
+  Voice tab (STT, TTS, Talk with push-to-talk or hands-free).
+* **Catalog sync** — import every model a provider serves (with kind, context, capabilities and prices from the
+  provider's API), daily and as soon as a key is added; Together models are probed so non-serverless ones are disabled.
+  `<provider>/*` wildcard routes reach any model id.
 * **Connect page** — ready-to-paste configs for OpenCode, Hermes Agent, jcode, omp, Claude Code and the SDKs.
 * **Secure by default** — no default credentials, secrets never reach the browser, only ports 80/443 published.
 
@@ -119,7 +131,7 @@ vision_model = "lora/vision"
 kind = "openai"
 base_url = "https://gateway.example.com/v1"
 api_key_env = "LORA_GATEWAY_API_KEY"
-models = ["default", "fast", "smart", "vision"]
+models = ["default", "fast", "smart", "vision", "stt", "tts", "talk"]
 
 # The same gateway also speaks the Anthropic Messages API.
 [providers.lora-anthropic]
@@ -133,7 +145,30 @@ model = "lora/fast"
 
 [profiles.smart]
 model = "lora/smart"
+
+# Voice through the gateway: open-weight by default (see "Voice & audio")
+[voice]
+dictation = true
+dictation_model = "lora/stt"
+language = "en"            # remove to auto-detect
+speech = true
+speech_model = "lora/tts"
+speech_voice = "af_heart"
+talk = true
+talk_model = "lora/talk"
+talk_voice = "af_heart"
+
+# alias names don't say what they do, so declare them
+[models."lora/stt"]
+audio = "transcription"
+[models."lora/tts"]
+audio = "speech"
+[models."lora/talk"]
+audio = "realtime"
 ```
+
+OpenAI voices instead (once an OpenAI key is added): `lora/stt-openai`, `lora/tts-openai` (voice `coral`) and
+`lora/talk-openai` (voice `marin`).
 
 ```bash
 malac -y fix the failing test and verify it      # uses lora/default
@@ -222,6 +257,122 @@ curl https://gateway.example.com/v1/messages \
   -H "x-api-key: $LORA_GATEWAY_API_KEY" -H "anthropic-version: 2023-06-01" -H "Content-Type: application/json" \
   -d '{"model":"default","max_tokens":256,"messages":[{"role":"user","content":"hi"}]}'
 ```
+
+## Voice & audio
+
+The gateway serves the OpenAI audio APIs with the same virtual keys, budgets and logging as chat:
+
+| Endpoint | Served by | Notes |
+|---|---|---|
+| `POST /v1/audio/transcriptions` | LiteLLM | multipart, up to 25 MB (Caddy allows 26 MB); cost = audio seconds × price per minute |
+| `POST /v1/audio/translations` | backend | LiteLLM has no translations route: the gateway transcribes (logged) and, if the speech was not English, translates the text with the `fast` alias (logged) |
+| `POST /v1/audio/speech` | LiteLLM | streamed audio (Caddy `flush_interval -1`); cost = characters × price per 1M characters |
+| `WS /v1/realtime?model=…` | backend | OpenAI Realtime protocol. Provider realtime models (OpenAI `gpt-realtime…`) are relayed to LiteLLM's `/v1/realtime` (audio-token cost logged by LiteLLM); pipeline models (`talk`) are served by the gateway itself |
+| `POST /v1/chat/completions` with audio | LiteLLM | "audio chat" models (`gpt-audio`, `gpt-audio-mini`) take `input_audio` parts and can return audio |
+| `GET /v1/models` | backend | LiteLLM's list for the key plus the gateway's pipeline models/aliases |
+
+Auth for the realtime WebSocket: `Authorization: Bearer <key>`, `api-key: <key>`, or the browser subprotocol
+`openai-insecure-api-key.<key>` (with `realtime`). Caddy keeps WebSockets open for up to 4 h.
+
+### Open-weight voice (default) and OpenAI alternatives
+
+| Alias | Target | Kind (LiteLLM mode) | Price | Voice |
+|---|---|---|---|---|
+| `stt` | `whisper-large-v3` (Together, openai/whisper-large-v3) | transcription (`audio_transcription`) | $0.0015 / min | – |
+| `listener` | `parakeet-tdt-0.6b-v3` (Together, nvidia/parakeet-tdt-0.6b-v3) | transcription | $0.0015 / min | – |
+| `tts` | `kokoro-82m` (Together, hexgrad/Kokoro-82M, Apache-2.0) | speech (`audio_speech`) | $4 / 1M chars | `af_heart` (54 voices) |
+| `talk` | `lora-talk` (gateway pipeline: whisper-large-v3 → deepseek-v4.1-flash → kokoro-82m) | realtime | sum of the three logged steps | `af_heart` |
+| `stt-openai` | `openai/gpt-4o-mini-transcribe` | transcription | $0.003 / min (token-billed) | – |
+| `tts-openai` | `openai/gpt-4o-mini-tts` | speech | ~$0.015 / min ($0.60 / 1M text in, $12 / 1M audio out) | `coral` |
+| `talk-openai` | `openai/gpt-realtime` | realtime | $4 / $16 text, $32 / $64 audio per 1M tokens | `marin` |
+
+Why these defaults: Whisper large-v3 is open-weight, multilingual (Hungarian included), $0.0015/min (half of
+gpt-4o-mini-transcribe) and answered in ~0.5 s. Kokoro-82M is open-weight, ~0.4 s per sentence and 16× cheaper than
+Cartesia Sonic (Sonic is proprietary). Orpheus 3B (open-weight) also works on Together but takes ~2 s.
+
+**The `talk` pipeline** (`backend/app/realtime.py`) implements the Realtime subset voice clients use:
+client events `session.update`, `input_audio_buffer.append/commit/clear`, `conversation.item.create` (text),
+`response.create`, `response.cancel`; server events `session.created/updated`, `input_audio_buffer.speech_started/
+speech_stopped/committed`, `conversation.item.created`, `conversation.item.input_audio_transcription.completed`,
+`response.created`, `response.output_item.added`, `response.content_part.added`, `response.output_audio_transcript.delta/done`,
+`response.output_audio.delta/done`, `response.output_item.done`, `response.done` (with usage and `gateway_metrics`) and
+`error`. Clients sending `OpenAI-Beta: realtime=v1` get the beta names (`response.audio.delta` …). Audio is PCM16 mono
+24 kHz. Turn detection: energy-based `server_vad` (`silence_duration_ms`, `threshold`, `prefix_padding_ms`; barge-in
+cancels the reply) or none (push-to-talk: commit + `response.create`). The reply is split into sentences (or clause
+breaks for long ones) and each is synthesised while the model is still writing. Measured over public HTTPS: first audio
+0.9–1.3 s after the end of speech (STT 0.2–0.7 s, LLM first token 0.2–0.4 s, first TTS chunk 0.3–0.4 s). Not
+implemented: function calling, image input, text-only output modality, `conversation.item.truncate`. Every step is a
+normal LiteLLM request made with the caller's key (tagged `voice:realtime`), so it is budgeted and shows up in Logs as
+transcription + chat + speech rows. Change the parts by editing the model's upstream ID
+(`<stt> | <chat> | <tts>`, any model names or aliases) on the Models page.
+
+### Analytics and logs
+Logs and the Dashboard have a **type** filter (chat / transcription / speech / realtime / audio). Audio quantities are
+derived per request from the logged cost and the deployment's unit price: seconds transcribed
+(`spend / input_cost_per_second`), characters spoken (`spend / input_cost_per_character`) and realtime session
+duration. `GET /api/analytics/audio` returns minutes transcribed, characters spoken, realtime minutes and audio cost.
+
+### Playground
+* **Dictation**: microphone button in the composer (or Ctrl+Shift+Space): records with MediaRecorder, shows a red dot,
+  timer and level; Enter inserts the text at the cursor, Esc discards.
+* **Read aloud**: speaker button on every finished reply (play/stop), with the model and voice from *Parameters → Voice*.
+* **Voice tab**: *Speech to text* (record or upload, model, language, transcribe/translate; text + latency + audio
+  seconds + cost), *Text to speech* (text, model, voice, format; play + download; first-byte and total latency, cost) and
+  *Talk* (realtime conversation through the backend WebSocket relay, hands-free or push-to-talk with Space,
+  transcript with per-turn latency, tokens and cost; Esc ends the session). The browser only gets a 60 s
+  ticket; the selected virtual key never leaves the server.
+
+### Tests
+```bash
+python3 scripts/verify_voice.py         # public HTTPS: /v1/models, speech, transcription, translation, 18 MB upload,
+                                        # realtime handshakes/errors, one spoken turn for talk + talk-openai, logs, analytics
+python3 scripts/voice_browser_test.py --openai   # Chrome with a fake microphone (a speech WAV): dictation, read-aloud,
+                                        # Voice tab STT/TTS/Talk, Tab walks, light + dark screenshots (docs/screenshots/voice_*)
+```
+
+## Model catalog sync
+
+*Providers → Sync models* (or *Models → Sync catalogs*) imports every model a provider serves; it also runs daily and as
+soon as a key is added (per-provider *Catalog sync* toggle). Sources: Together `/v1/models` (type, pricing incl.
+per-minute transcription and per-character TTS, context; voices from `/v1/voices`), OpenRouter `/api/v1/models`
+(per-token pricing, context, input modalities → vision, `supported_parameters` → reasoning), Vercel AI Gateway
+`/v1/models` (type, pricing, context, tags), and the plain OpenAI `/models` list for everyone else (DeepInfra pricing
+metadata and Groq/Mistral fields are used when present, otherwise the model is tagged `price-unknown`). Image/video
+generation, rerank and moderation models are skipped.
+
+* Synced models are named `<provider>/<upstream id>` (e.g. `together/MiniMaxAI/MiniMax-M3`), are registered in LiteLLM
+  (routable, listed by `/v1/models`) but not **pinned**, so the Models page and Playground pickers show the curated set
+  until you search, filter or switch to *All*. Star a model to pin it.
+* Together lists dedicated-only and data-sharing-gated models next to serverless ones, so its sync also **probes** each
+  model with one tiny real request and disables the ones that fail, with the reason (e.g. "Not serverless", "Needs
+  third-party data sharing"). In our test (October 2026) 215 Together models were listed, 11 of the imported ones were
+  serverless for a standard account.
+* **Wildcard routes**: every active provider also gets a `<provider>/*` deployment, so `together/<any id>` or
+  `openrouter/<any id>` works even before a sync.
+
+## Providers
+
+| Provider | LiteLLM prefix | Base URL | Enabled by default | Voice models in the template |
+|---|---|---|---|---|
+| Together AI | together_ai | https://api.together.xyz/v1 | key from `SEED_TOGETHER_API_KEY` | Whisper large-v3, Parakeet, Kokoro, Cartesia Sonic 3 |
+| OpenAI | openai | https://api.openai.com/v1 | template | gpt-4o(-mini)-transcribe, whisper-1, gpt-4o-mini-tts, tts-1(-hd), gpt-realtime(-mini, -2.1), gpt-audio(-mini) |
+| Lora voice pipeline | (gateway) | – | yes (needs Together) | lora-talk |
+| OpenRouter | openrouter | https://openrouter.ai/api/v1 | template | – (chat; audio-in models flagged) |
+| Vercel AI Gateway | openai (custom base) | https://ai-gateway.vercel.sh/v1 | template | – |
+| Groq | groq | https://api.groq.com/openai/v1 | template | whisper-large-v3(-turbo), Orpheus v1 English |
+| DeepInfra | deepinfra | https://api.deepinfra.com/v1/openai | template | Whisper large-v3 turbo, Kokoro (prices unverified) |
+| Fireworks AI | fireworks_ai | https://api.fireworks.ai/inference/v1 (audio: audio-prod / audio-turbo hosts) | template | whisper-v3(-turbo) (unverified) |
+| Mistral | mistral | https://api.mistral.ai/v1 | template | Voxtral transcribe / TTS (unverified) |
+| Google Gemini | openai (custom base) | https://generativelanguage.googleapis.com/v1beta/openai | template | – |
+| DeepSeek | deepseek | https://api.deepseek.com | template | – |
+| Cerebras, SambaNova, Hyperbolic, Nebius AI Studio, Novita, Baseten | cerebras, sambanova, hyperbolic, nebius, novita, baseten | see Providers page | template (empty; Sync models after adding a key) | – |
+| xAI, Z.ai, Anthropic | xai, openai, anthropic | – | template | – |
+| Local / Ollama / vLLM | openai (custom base) | http://host.docker.internal:11434/v1 | template | any |
+
+Template models tagged `unverified` could not be checked against an official page: Gemini IDs/prices (from LiteLLM's
+cost map; Google's docs could not be fetched), Mistral Voxtral, DeepInfra and Fireworks audio prices,
+`openai/gpt-4o(-mini)-audio-preview` (no longer on OpenAI's pricing page, kept disabled), local/Ollama names.
+Verified: OpenAI audio prices (OpenAI pricing page, 2026-10-27), Groq (models page), DeepSeek (pricing page), Together (API).
 
 ## Operations
 

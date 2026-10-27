@@ -1,14 +1,33 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
-import { RotateCcw, X, Brain, ChevronRight, AlertTriangle, User, Square, Loader2, MessagesSquare, Code2, Image as ImageIcon, ImageOff, Lightbulb, Play, Scissors } from 'lucide-vue-next'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { Volume2, VolumeX, RotateCcw, X, Brain, ChevronRight, AlertTriangle, User, Square, Loader2, MessagesSquare, Code2, Image as ImageIcon, ImageOff, Lightbulb, Play, Scissors } from 'lucide-vue-next'
 import BrandMark from '../BrandMark.vue'
 import type { Pane, PgModel, Turn } from '../../playground'
 import { fmtCost, fmtInt, fmtMs } from '../../format'
 import MarkdownView from './MarkdownView.vue'
 import ModelPicker from './ModelPicker.vue'
 import CopyButton from '../CopyButton.vue'
+import { onSpeak, speak, stopSpeaking } from '../../voice'
+import { fail } from '../../stores/toast'
 
-const props = defineProps<{ pane: Pane; models: PgModel[]; compare?: boolean; removable?: boolean; index?: number; maxCap?: number; defaultMax?: number }>()
+const props = defineProps<{ pane: Pane; models: PgModel[]; compare?: boolean; removable?: boolean; index?: number; maxCap?: number; defaultMax?: number
+  /** read-aloud settings (Parameters > Voice); null = no live speech model */
+  tts?: { model: string; voice: string | null; key_id: number | null } | null }>()
+// read aloud: one reply at a time, shared across panes
+const speakState = ref<Record<string, 'loading' | 'playing'>>({})
+const off = onSpeak((id, s, err) => {
+  const next = { ...speakState.value }
+  if (s === 'idle') delete next[id]; else next[id] = s
+  speakState.value = next
+  if (err) fail('Could not read the reply aloud', err)
+})
+onBeforeUnmount(() => { off(); if (Object.keys(speakState.value).length) stopSpeaking() })
+function toggleSpeak(t: Turn) {
+  const id = props.pane.id + ':' + t.id
+  if (speakState.value[id]) return stopSpeaking()
+  if (props.tts) speak(id, t.content, props.tts)
+}
+const sid = (t: Turn) => props.pane.id + ':' + t.id
 const emit = defineEmits<{ model: [v: string]; regenerate: []; remove: []; stop: []; suggest: [text: string]; continue: [t: Turn]; retry: [t: Turn] }>()
 const isTrunc = (t: Turn) => !!t.metrics && (t.metrics.truncated || t.metrics.finish_reason === 'length' || t.metrics.finish_reason === 'max_tokens')
 const usedMax = (t: Turn) => t.metrics?.max_tokens || 0
@@ -135,6 +154,11 @@ const providerLine = (t: Turn) => {
               </template>
               <span class="spacer" />
               <span class="acts">
+                <button v-if="t.content && t.state === 'done' && tts" class="btn btn-sm btn-icon" :class="{ on: speakState[sid(t)] }"
+                  :title="speakState[sid(t)] ? 'Stop reading' : 'Read aloud (' + tts.model + (tts.voice ? ', ' + tts.voice : '') + ')'"
+                  :aria-label="speakState[sid(t)] ? 'Stop reading aloud' : 'Read reply aloud'" :aria-pressed="!!speakState[sid(t)]" @click="toggleSpeak(t)">
+                  <Loader2 v-if="speakState[sid(t)] === 'loading'" class="spin" /><VolumeX v-else-if="speakState[sid(t)] === 'playing'" /><Volume2 v-else />
+                </button>
                 <CopyButton v-if="t.content" :text="t.content" />
                 <button v-if="isLast(t) && !busy" class="btn btn-sm btn-icon" title="Regenerate" aria-label="Regenerate" @click="emit('regenerate')"><RotateCcw /></button>
               </span>
@@ -207,6 +231,7 @@ const providerLine = (t: Turn) => {
 .m i { font-style: normal; color: var(--text-3); margin-right: 5px; font: 400 12px var(--font); }
 .m.wide { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acts { display: inline-flex; gap: 6px; }
+.acts .btn.on { background: var(--ink); color: var(--on-ink); border-color: var(--ink); }
 .compare .meta { gap: 4px 10px; }
 @media (max-width: 700px) { .sugg { grid-template-columns: 1fr; } .msgs { padding: 14px 10px 8px; } }
 </style>

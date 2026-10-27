@@ -22,7 +22,10 @@ def provider_out(p: Provider) -> dict:
         "enabled": p.enabled, "description": p.description, "has_key": bool(key), "key_masked": mask(key),
         "last_test_at": p.last_test_at, "last_test_ok": p.last_test_ok, "last_test_msg": p.last_test_msg,
         "model_count": len(p.models), "enabled_model_count": sum(1 for m in p.models if m.enabled),
-        "status": ("active" if p.enabled and key else "missing_key" if p.enabled else "disabled"),
+        "status": ("active" if p.kind == "pipeline" and p.enabled else "active" if p.enabled and key else "missing_key" if p.enabled else "disabled"),
+        "auto_sync": p.auto_sync, "last_sync_at": p.last_sync_at, "last_sync_ok": p.last_sync_ok, "last_sync_msg": p.last_sync_msg,
+        "synced_count": sum(1 for m in p.models if m.synced), "pinned_count": sum(1 for m in p.models if m.pinned),
+        "can_sync": p.kind not in ("pipeline", "anthropic"),
     }
 
 
@@ -70,10 +73,32 @@ def update_provider(pid: int, body: ProviderPatch, db: Session = Depends(get_db)
         p.enabled = body.enabled
     if body.description is not None:
         p.description = body.description
+    if body.auto_sync is not None:
+        p.auto_sync = body.auto_sync
+    key_added = bool(body.api_key and body.api_key.strip())
     db.commit()
     db.refresh(p)
     s = sync_safe(db)
+    if key_added and p.enabled and p.auto_sync and p.kind not in ("pipeline", "anthropic"):
+        start_background_sync(p.id)  # import the provider's catalog as soon as a key is added
+        s["catalog_sync"] = "started"
     return {"provider": provider_out(p), "sync": s}
+
+
+def start_background_sync(pid: int):
+    import threading
+    from ..catalog_sync import sync_provider
+    from ..db import SessionLocal
+
+    def run():
+        db = SessionLocal()
+        try:
+            p = db.get(Provider, pid)
+            if p:
+                sync_provider(db, p, probe=p.kind == "together")
+        finally:
+            db.close()
+    threading.Thread(target=run, daemon=True).start()
 
 
 @router.delete("/{pid}")
@@ -145,3 +170,22 @@ def upstream_models(pid: int, db: Session = Depends(get_db), _: User = Depends(c
     if not ok:
         raise HTTPException(400, msg)
     return sorted(models, key=lambda m: m["id"])
+
+
+@router.post("/{pid}/sync")
+def sync_models(pid: int, probe: bool = False, db: Session = Depends(get_db), _: User = Depends(current_user)):
+    """Import the provider's full model list (kinds, context, prices); probe=true also tests availability."""
+    from ..catalog_sync import sync_provider
+    p = db.get(Provider, pid)
+    if not p:
+        raise HTTPException(404, "Provider not found")
+    return sync_provider(db, p, probe=probe)
+
+
+@router.post("/{pid}/probe")
+def probe_models(pid: int, all: bool = False, db: Session = Depends(get_db), _: User = Depends(current_user)):
+    from ..catalog_sync import probe_provider
+    p = db.get(Provider, pid)
+    if not p:
+        raise HTTPException(404, "Provider not found")
+    return probe_provider(db, p, only_unprobed=not all)

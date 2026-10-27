@@ -112,8 +112,18 @@ def _model_entry(m: Model, name: str | None = None, kind: str = "model", alias: 
         "provider_slug": p.slug, "provider_name": p.name, "provider_enabled": p.enabled,
         "enabled": m.enabled, "live": deployable(m), **caps(m),
         "input_price_per_m": m.input_price_per_m, "output_price_per_m": m.output_price_per_m,
-        "context_window": m.context_window,
+        "context_window": m.context_window, **audio_meta(m), "pinned": bool(m.pinned) or kind == "alias",
+        "synced": bool(m.synced),
     }
+
+
+def audio_meta(m: Model | None) -> dict:
+    if m is None:
+        return {"audio": "chat", "voices": [], "default_voice": None, "price_per_minute": None, "price_per_m_chars": None,
+                "audio_input_price_per_m": None, "audio_output_price_per_m": None}
+    return {"audio": m.kind or "chat", "voices": m.voices or [], "default_voice": m.default_voice,
+            "price_per_minute": m.price_per_minute, "price_per_m_chars": m.price_per_m_chars,
+            "audio_input_price_per_m": m.audio_input_price_per_m, "audio_output_price_per_m": m.audio_output_price_per_m}
 
 
 def _price_index(db: Session) -> dict:
@@ -325,7 +335,7 @@ def options(db: Session = Depends(get_db), _: User = Depends(current_user)):
             models.append({"name": a.name, "kind": "alias", "display_name": a.description or a.name, "target": None,
                            "upstream_id": None, "provider_slug": None, "provider_name": None, "provider_enabled": False,
                            "enabled": False, "live": False, **caps(None), "input_price_per_m": 0, "output_price_per_m": 0,
-                           "context_window": None})
+                           "context_window": None, **audio_meta(None), "pinned": True, "synced": False})
     for p in db.scalars(select(Provider).order_by(Provider.id)).all():
         for m in sorted(p.models, key=lambda x: x.id):
             models.append(_model_entry(m))

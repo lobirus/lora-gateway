@@ -64,7 +64,8 @@ def overview(db: Session = Depends(get_db), _: User = Depends(current_user)):
 @router.get("/connect")
 def connect_info(request_host: str | None = None, _: User = Depends(current_user), db: Session = Depends(get_db)):
     host = settings.public_host
-    models = [m.model_name for m in db.scalars(select(Model)).all() if deployable(m)]
+    # pinned models only (the synced catalog can hold hundreds; clients discover those via /v1/models)
+    models = [m.model_name for m in db.scalars(select(Model)).all() if deployable(m) and m.pinned and (m.kind or "chat") in ("chat", "input")]
     aliases = [a.name for a in db.scalars(select(Alias)).all() if deployable(a.target)]
     return {
         "public_host": host,

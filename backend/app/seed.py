@@ -5,9 +5,9 @@ import time
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .catalog import CATALOG, DEFAULT_ALIASES
+from .catalog import CATALOG, CATALOG_VERSION, DEFAULT_ALIASES
 from .config import PLACEHOLDER_VALUES, settings
-from .db import Alias, ApiKey, Model, Provider, SessionLocal, User
+from .db import Alias, ApiKey, Meta, Model, Provider, SessionLocal, User
 from .litellm_sync import sync_safe
 from .schemas import KeyIn
 from .security import encrypt, hash_password
@@ -15,13 +15,30 @@ from .security import encrypt, hash_password
 log = logging.getLogger("gateway.seed")
 
 
+def _catalog_version(db: Session) -> int:
+    m = db.get(Meta, "catalog_version")
+    return int(m.value) if m and m.value else 0
+
+
 def seed_catalog(db: Session):
+    fresh = not db.scalar(select(Provider))
+    upgrade = not fresh and _catalog_version(db) < CATALOG_VERSION
     for p in CATALOG:
-        if db.scalar(select(Provider).where(Provider.slug == p["slug"])):
+        existing = db.scalar(select(Provider).where(Provider.slug == p["slug"]))
+        if existing:
+            if upgrade:  # one-time: add catalog models this install does not have yet (never re-adds deleted ones later)
+                n = 0
+                for m in p["models"]:
+                    if not db.scalar(select(Model).where(Model.model_name == m["model_name"])):
+                        db.add(Model(provider_id=existing.id, **m))
+                        n += 1
+                if n:
+                    log.info("catalog upgrade: added %d models to %s", n, p["slug"])
             continue
         key = settings.seed_together_key if p["slug"] == "together" else None
         prov = Provider(slug=p["slug"], name=p["name"], kind=p["kind"], api_base=p.get("api_base"),
-                        api_key_enc=encrypt(key), enabled=p["enabled"] and bool(key), description=p.get("description"))
+                        api_key_enc=encrypt(key), enabled=p["enabled"] and (bool(key) or p["kind"] == "pipeline"),
+                        description=p.get("description"))
         db.add(prov)
         db.flush()
         for m in p["models"]:
@@ -29,15 +46,20 @@ def seed_catalog(db: Session):
                 db.add(Model(provider_id=prov.id, **m))
         log.info("seeded provider %s", p["slug"])
     db.flush()
-    for name, target, desc in DEFAULT_ALIASES:
+    for name, target, desc in (DEFAULT_ALIASES if fresh or upgrade else []):
         if db.scalar(select(Alias).where(Alias.name == name)):
             continue
         m = db.scalar(select(Model).where(Model.model_name == target))
         db.add(Alias(name=name, target_model_id=m.id if m else None, description=desc))
+    meta = db.get(Meta, "catalog_version") or Meta(key="catalog_version")
+    meta.value = str(CATALOG_VERSION)
+    db.merge(meta)
     db.commit()
 
 
-CAP_FIELDS = ("max_output_tokens", "default_max_tokens", "supports_reasoning", "supports_vision", "reasoning_efforts")
+CAP_FIELDS = ("max_output_tokens", "default_max_tokens", "supports_reasoning", "supports_vision", "reasoning_efforts",
+              "voices", "default_voice", "price_per_minute", "price_per_m_chars", "audio_input_price_per_m",
+              "audio_output_price_per_m")
 
 
 def backfill_capabilities(db: Session):

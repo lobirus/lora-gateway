@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { Send, Square, Paperclip, X, Plus, Code2, SlidersHorizontal, Columns3, MessageSquare, RotateCcw, Trash2, Eye, AlertTriangle, KeyRound, RefreshCw, ImageOff } from 'lucide-vue-next'
+import { Send, Square, Paperclip, X, Plus, Code2, SlidersHorizontal, Columns3, MessageSquare, RotateCcw, Trash2, Eye, AlertTriangle, KeyRound, RefreshCw, ImageOff, Mic, AudioLines, Loader2 } from 'lucide-vue-next'
 import { api } from '../api'
 import { CONTINUE_PROMPT, DEFAULT_PARAMS, EFFORT_LABELS, FALLBACK_MAX_TOKENS, buildCode, imageToDataUrl, runChat, sanitizeParams, uid } from '../playground'
 import type { ChatRequest, Effort, EffortParam, Pane, PgMetrics, PgOptions, PgParams, Turn, WireMessage } from '../playground'
@@ -12,17 +12,20 @@ import ModelPicker from '../components/playground/ModelPicker.vue'
 import Modal from '../components/Modal.vue'
 import Toggle from '../components/Toggle.vue'
 import CodeBlock from '../components/CodeBlock.vue'
+import VoicePanel from '../components/playground/VoicePanel.vue'
+import { Recorder, extFor, micAvailable, pickDefault, stopSpeaking, transcribe } from '../voice'
 
 const opts = ref<PgOptions | null>(null)
 const loading = ref(true)
 const params = reactive<PgParams>({ ...DEFAULT_PARAMS, ...sanitizeParams(JSON.parse(localStorage.getItem('gw-pg-params') || '{}') as Partial<PgParams>) })
 watch(params, (p) => localStorage.setItem('gw-pg-params', JSON.stringify(p)), { deep: true })
-const mode = ref<'chat' | 'compare'>((localStorage.getItem('gw-pg-mode') as 'chat' | 'compare') || 'chat')
+type Mode = 'chat' | 'compare' | 'voice'
+const mode = ref<Mode>((localStorage.getItem('gw-pg-mode') as Mode) || 'chat')
 watch(mode, (m) => localStorage.setItem('gw-pg-mode', m))
 const savedModels: string[] = JSON.parse(localStorage.getItem('gw-pg-models') || '["default","fast","smart"]')
 const panes = ref<Pane[]>([{ id: uid(), model: savedModels[0] || 'default', turns: [], controller: null }])
 const compareModels = ref<string[]>(savedModels.slice(1, 3).length ? savedModels.slice(1, 3) : ['fast'])
-const visiblePanes = computed(() => (mode.value === 'chat' ? panes.value.slice(0, 1) : panes.value))
+const visiblePanes = computed(() => (mode.value === 'compare' ? panes.value : panes.value.slice(0, 1)))
 watch(() => [mode.value, panes.value.map((p) => p.model)], () => {
   localStorage.setItem('gw-pg-models', JSON.stringify([...panes.value.map((p) => p.model), ...compareModels.value].slice(0, 3)))
 }, { deep: true })
@@ -45,6 +48,68 @@ async function load() {
   } catch (e) { fail('Could not load playground options', e) } finally { loading.value = false }
 }
 onMounted(() => { load(); setMode(mode.value); nextTick(() => ta.value?.focus()) })
+
+// ---- voice: dictation into the composer + read-aloud settings ---------------------------------
+const voiceCfg = reactive<{ stt: string; language: string; tts: string; voice: string }>({ stt: '', language: '', tts: '', voice: '', ...JSON.parse(localStorage.getItem('gw-pg-voice') || '{}') })
+watch(voiceCfg, (v) => localStorage.setItem('gw-pg-voice', JSON.stringify(v)), { deep: true })
+const sttModels = computed(() => models.value.filter((m) => m.audio === 'transcription' && m.live))
+const ttsModels = computed(() => models.value.filter((m) => m.audio === 'speech' && m.live))
+const ttsVoices = computed(() => modelInfo(voiceCfg.tts)?.voices || [])
+watch(() => opts.value?.models, () => {
+  if (!sttModels.value.some((m) => m.name === voiceCfg.stt)) voiceCfg.stt = pickDefault(models.value, 'transcription', 'stt')
+  if (!ttsModels.value.some((m) => m.name === voiceCfg.tts)) voiceCfg.tts = pickDefault(models.value, 'speech', 'tts')
+})
+watch(() => voiceCfg.tts, () => { if (ttsVoices.value.length && !ttsVoices.value.includes(voiceCfg.voice)) voiceCfg.voice = modelInfo(voiceCfg.tts)?.default_voice || ttsVoices.value[0] })
+const ttsSettings = computed(() => (voiceCfg.tts ? { model: voiceCfg.tts, voice: voiceCfg.voice || null, key_id: params.key_id } : null))
+const micErr = micAvailable()
+const dict = ref<'idle' | 'recording' | 'transcribing'>('idle')
+const dictMs = ref(0)
+const dictLevel = ref(0)
+let dictRec: Recorder | null = null
+let dictTimer = 0
+const micBtn = ref<HTMLButtonElement | null>(null)
+async function toggleDictation() {
+  if (dict.value === 'recording') return finishDictation()
+  if (dict.value !== 'idle') return
+  if (micErr) return toast('error', 'Dictation unavailable', micErr)
+  if (!voiceCfg.stt) return toast('error', 'No transcription model', 'Enable one under Models (e.g. Whisper) to dictate.')
+  try {
+    dictRec = new Recorder()
+    await dictRec.start((v) => (dictLevel.value = v))
+    dict.value = 'recording'
+    dictTimer = window.setInterval(() => (dictMs.value = dictRec?.elapsed() || 0), 200)
+    nextTick(() => micBtn.value?.focus()) // the composer is replaced by the recording bar; keep keyboard focus nearby
+  } catch (e) { dictRec = null; fail('Microphone unavailable', e) }
+}
+async function finishDictation() {
+  if (!dictRec) return
+  clearInterval(dictTimer)
+  const r = dictRec
+  dictRec = null
+  dict.value = 'transcribing'
+  try {
+    const out = await r.stop()
+    const res = await transcribe(out.blob, 'dictation.' + extFor(out.mime), { model: voiceCfg.stt, language: voiceCfg.language || undefined, key_id: params.key_id })
+    if (!res.ok) throw new Error(res.error || 'Transcription failed')
+    const text = (res.text || '').trim()
+    if (text) {
+      const el = ta.value
+      const at = el && document.activeElement === el ? el.selectionStart : input.value.length
+      const before = input.value.slice(0, at), after = input.value.slice(at)
+      input.value = before + (before && !/s$/.test(before) ? ' ' : '') + text + (after && !/^s/.test(after) ? ' ' : '') + after
+    } else toast('info', 'No speech detected')
+  } catch (e) { fail('Dictation failed', e) } finally { dict.value = 'idle'; dictMs.value = 0; nextTick(() => ta.value?.focus()) }
+}
+function cancelDictation() { clearInterval(dictTimer); dictRec?.cancel(); dictRec = null; dict.value = 'idle'; dictMs.value = 0; nextTick(() => ta.value?.focus()) }
+function onGlobalKey(e: KeyboardEvent) {
+  if (mode.value === 'voice') return
+  if (e.code === 'Space' && e.shiftKey && (e.ctrlKey || e.metaKey)) { e.preventDefault(); toggleDictation() }
+  else if (e.key === 'Escape' && dict.value === 'recording') { e.preventDefault(); cancelDictation() }
+  else if (e.key === 'Enter' && dict.value === 'recording' && document.activeElement !== micBtn.value) { e.preventDefault(); finishDictation() }
+}
+onMounted(() => document.addEventListener('keydown', onGlobalKey))
+onBeforeUnmount(() => { document.removeEventListener('keydown', onGlobalKey); cancelDictation(); stopSpeaking() })
+const fmtClock = (ms: number) => { const s = Math.floor(ms / 1000); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0') }
 // the composer only renders once models are loaded: focus it then (unless the user already focused something)
 watch(() => !!opts.value, (ready, was) => { if (ready && !was) nextTick(() => { if (!document.activeElement || document.activeElement === document.body) ta.value?.focus() }) })
 
@@ -114,8 +179,9 @@ function resolveBlock(choice: 'vision' | 'strip' | 'cancel') {
   else regenerateAll(true)
 }
 
-function setMode(m: 'chat' | 'compare') {
+function setMode(m: Mode) {
   mode.value = m
+  if (m === 'voice') return
   if (m === 'compare' && panes.value.length < 2) {
     const base = panes.value[0]
     const extra = compareModels.value.length ? compareModels.value : ['fast']
@@ -254,6 +320,7 @@ function stop() { for (const p of panes.value) p.controller?.abort() }
 function newChat() { stop(); for (const p of panes.value) p.turns = []; nextTick(() => ta.value?.focus()) }
 
 function onKey(e: KeyboardEvent) {
+  if (dict.value === 'recording' && e.key === 'Enter') { e.preventDefault(); finishDictation(); return }
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send() }
   else if (e.key === 'Escape' && busy.value) { e.preventDefault(); stop() }
 }
@@ -323,9 +390,12 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); stop() }
         <div class="segmented">
           <button :class="{ active: mode === 'chat' }" :aria-pressed="mode === 'chat'" @click="setMode('chat')"><MessageSquare :size="14" /> Chat</button>
           <button :class="{ active: mode === 'compare' }" :aria-pressed="mode === 'compare'" @click="setMode('compare')"><Columns3 :size="14" /> Compare</button>
+          <button :class="{ active: mode === 'voice' }" :aria-pressed="mode === 'voice'" @click="setMode('voice')"><AudioLines :size="14" /> Voice</button>
         </div>
-        <button class="btn" @click="showCode = true; codePane = 0"><Code2 /> View code</button>
-        <button class="btn" :disabled="!hasTurns && !busy" @click="newChat"><Trash2 /> New chat</button>
+        <template v-if="mode !== 'voice'">
+          <button class="btn" @click="showCode = true; codePane = 0"><Code2 /> View code</button>
+          <button class="btn" :disabled="!hasTurns && !busy" @click="newChat"><Trash2 /> New chat</button>
+        </template>
         <button class="btn btn-icon params-btn" :class="{ on: showParams }" :aria-pressed="showParams" title="Parameters" aria-label="Parameters" @click="showParams = !showParams"><SlidersHorizontal /></button>
       </div>
     </div>
@@ -333,6 +403,7 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); stop() }
     <div class="pg-body" :class="{ 'with-side': showParams }">
       <div class="pg-main card" :class="{ dragging }" @dragover.prevent="dragging = true" @dragleave.self="dragging = false" @drop.prevent="onDrop">
         <div v-if="loading && !opts" class="loading"><div class="skeleton" style="height: 18px; width: 40%" /><div class="skeleton" style="height: 14px; width: 60%; margin-top: 10px" /></div>
+        <VoicePanel v-else-if="mode === 'voice'" :models="models" :key-id="params.key_id" />
         <template v-else>
           <div v-if="mode === 'chat'" class="chat-top">
             <ModelPicker v-model="panes[0].model" :models="models" class="main-picker" />
@@ -340,7 +411,7 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); stop() }
           </div>
           <div class="panes" :class="'n' + visiblePanes.length">
             <ChatPane v-for="(p, i) in visiblePanes" :key="p.id" :pane="p" :models="models" :compare="mode === 'compare'" :index="i" :removable="mode === 'compare' && panes.length > 2"
-              :max-cap="capFor(p.model)" :default-max="defaultFor(p.model)"
+              :max-cap="capFor(p.model)" :default-max="defaultFor(p.model)" :tts="ttsSettings"
               @model="p.model = $event" @regenerate="regenerate(p)" @remove="removePane(i)" @suggest="(s) => { input = s; ta?.focus() }"
               @continue="(t) => continueReply(p, t)" @retry="(t) => retryMore(p, t)" />
             <button v-if="mode === 'compare' && panes.length < 3" class="add-pane" @click="addPane"><Plus :size="18" /><span>Add model</span></button>
@@ -368,13 +439,22 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); stop() }
             <div class="box">
               <button class="btn btn-ghost btn-icon" title="Attach image (or paste / drop)" aria-label="Attach image (or paste / drop)" @click="fileEl?.click()"><Paperclip /></button>
               <input ref="fileEl" type="file" accept="image/*" multiple hidden @change="addFiles(($event.target as HTMLInputElement).files)" />
-              <textarea ref="ta" v-model="input" rows="1" class="ta" aria-label="Message" :placeholder="mode === 'compare' ? 'Send the same prompt to ' + visiblePanes.length + ' models…' : 'Message ' + panes[0].model + '…'" @keydown="onKey" @paste="onPaste" />
+              <button ref="micBtn" class="btn btn-ghost btn-icon mic" :class="{ recording: dict === 'recording' }" :disabled="dict === 'transcribing' || (!!micErr && dict === 'idle')"
+                :title="micErr || (dict === 'recording' ? 'Stop and insert text (Enter)' : 'Dictate (Ctrl+Shift+Space)')" :aria-label="dict === 'recording' ? 'Stop dictation and insert text' : 'Dictate'" :aria-pressed="dict === 'recording'" @click="toggleDictation">
+                <Loader2 v-if="dict === 'transcribing'" class="spin" /><Square v-else-if="dict === 'recording'" /><Mic v-else />
+              </button>
+              <div v-if="dict !== 'idle'" class="dict" role="status" aria-live="polite">
+                <template v-if="dict === 'recording'"><span class="rec-dot" aria-hidden="true" /><b class="tnum">{{ fmtClock(dictMs) }}</b><span class="meter" aria-hidden="true"><span :style="{ width: Math.round(dictLevel * 100) + '%' }" /></span><span class="muted">Recording · <kbd>Enter</kbd> insert · <kbd>Esc</kbd> discard</span>
+                  <button class="btn btn-sm btn-ghost" @click="cancelDictation">Discard</button></template>
+                <template v-else><span class="muted">Transcribing with <span class="mono">{{ voiceCfg.stt }}</span>…</span></template>
+              </div>
+              <textarea v-show="dict === 'idle'" ref="ta" v-model="input" rows="1" class="ta" aria-label="Message" :placeholder="mode === 'compare' ? 'Send the same prompt to ' + visiblePanes.length + ' models…' : 'Message ' + panes[0].model + '…'" @keydown="onKey" @paste="onPaste" />
               <button v-if="hasTurns && !busy" class="btn btn-ghost btn-icon" title="Regenerate last response" aria-label="Regenerate last response" @click="regenerateAll()"><RotateCcw /></button>
               <button v-if="busy" class="btn btn-danger send" title="Stop (Esc)" @click="stop"><Square /> Stop</button>
               <button v-else class="btn btn-primary send" :disabled="!input.trim() && !attachments.length" title="Send (Enter)" @click="send()"><Send /> Send</button>
             </div>
             <div class="foot muted">
-              <span><kbd>Enter</kbd> send · <kbd>Shift</kbd>+<kbd>Enter</kbd> newline · <kbd>Esc</kbd> stop</span>
+              <span><kbd>Enter</kbd> send · <kbd>Shift</kbd>+<kbd>Enter</kbd> newline · <kbd>Esc</kbd> stop · <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Space</kbd> dictate</span>
               <span class="spacer" />
               <span class="chip">{{ params.api_format === 'anthropic' ? 'Anthropic /v1/messages' : 'OpenAI /v1/chat/completions' }}</span>
               <span class="chip">{{ params.stream ? 'streaming' : 'non-streaming' }}</span>
@@ -441,6 +521,19 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); stop() }
               <template v-else>Off disables thinking (<span class="mono">reasoning.enabled=false</span>); Low/Medium/High set <span class="mono">reasoning_effort</span>. Only levels the model honours are shown{{ mode === 'compare' ? '; columns whose model lacks a level use its default' : '' }}.</template>
             </span>
           </div>
+          <div class="voice-sec">
+            <div class="s-h"><span>Voice</span></div>
+            <div class="field"><label>Dictation model</label>
+              <select v-model="voiceCfg.stt" class="input"><option v-if="!sttModels.length" value="">No transcription model enabled</option><option v-for="m in sttModels" :key="m.name" :value="m.name">{{ m.kind === 'alias' ? m.name + ' → ' + m.target : m.name }}</option></select></div>
+            <div class="field"><label>Dictation language</label>
+              <select v-model="voiceCfg.language" class="input"><option value="">Auto-detect</option><option value="en">English</option><option value="hu">Hungarian</option><option value="de">German</option><option value="fr">French</option><option value="es">Spanish</option></select></div>
+            <div class="field"><label>Read-aloud model</label>
+              <select v-model="voiceCfg.tts" class="input"><option v-if="!ttsModels.length" value="">No speech model enabled</option><option v-for="m in ttsModels" :key="m.name" :value="m.name">{{ m.kind === 'alias' ? m.name + ' → ' + m.target : m.name }}</option></select></div>
+            <div class="field"><label>Voice</label>
+              <select v-if="ttsVoices.length" v-model="voiceCfg.voice" class="input"><option v-for="v in ttsVoices" :key="v" :value="v">{{ v }}</option></select>
+              <input v-else v-model="voiceCfg.voice" class="input" placeholder="model default" />
+              <span class="hint">Used by the speaker button on replies.</span></div>
+          </div>
           <div v-if="mode === 'compare'" class="field">
             <label>Compare columns</label>
             <span class="hint">Pick a model at the top of each column. The same prompt and parameters are sent to every column in parallel.</span>
@@ -505,6 +598,15 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); stop() }
 .box:focus-within { border-color: var(--focus); box-shadow: 0 0 0 1px var(--focus); }
 .ta { flex: 1; border: 0; outline: none; resize: none; background: transparent; color: var(--text); font: 14px/1.5 var(--font); padding: 7px 4px; max-height: 220px; min-height: 36px; }
 .send { min-width: 92px; }
+.mic.recording { color: var(--danger); }
+.dict { flex: 1; display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 0 4px; font-size: 13px; flex-wrap: wrap; }
+.rec-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--danger); animation: pulse 1.2s infinite; }
+@keyframes pulse { 50% { opacity: .35; } }
+.meter { width: 90px; height: 4px; background: var(--bg-subtle); border-radius: 2px; overflow: hidden; display: inline-block; }
+.meter span { display: block; height: 100%; background: var(--text-3); transition: width .08s linear; }
+.voice-sec { border-top: 1px solid var(--border); padding-top: 14px; margin-bottom: 4px; }
+.voice-sec .s-h { margin-bottom: 10px; }
+.voice-sec .field { margin-bottom: 12px; }
 .foot { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 11.5px; flex-wrap: wrap; }
 kbd { font: 10.5px var(--font); background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; color: var(--text-2); }
 .chip { display: inline-flex; align-items: center; gap: 4px; background: transparent; border: 1px solid var(--border); border-radius: 3px; padding: 0 6px; color: var(--text-2); font-family: var(--font); font-size: 11px; }

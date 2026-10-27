@@ -5,14 +5,14 @@ from fastapi.middleware.gzip import GZipMiddleware
 from sqlalchemy import text
 
 from .db import engine, init_db
-from .routers import analytics, auth, keys, models, playground, providers, system
+from .routers import analytics, auth, keys, models, playground, providers, system, voice, gateway_v1
 from .seed import seed_all
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 app = FastAPI(title="Lora Gateway control plane", docs_url="/api/docs", openapi_url="/api/openapi.json", redoc_url=None)
 app.add_middleware(GZipMiddleware, minimum_size=1024)
-for r in (auth.router, providers.router, models.router, keys.router, analytics.router, playground.router, system.router):
+for r in (auth.router, providers.router, models.router, keys.router, analytics.router, playground.router, voice.router, system.router, gateway_v1.router):
     app.include_router(r)
 
 
@@ -20,6 +20,8 @@ for r in (auth.router, providers.router, models.router, keys.router, analytics.r
 def startup():
     # one worker does the seeding; a PG advisory lock serialises multiple uvicorn workers
     init_db_locked()
+    from .catalog_sync import start_scheduler
+    start_scheduler()
 
 
 def init_db_locked():

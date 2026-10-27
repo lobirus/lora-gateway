@@ -13,21 +13,51 @@
 		-Server
 	}
 
-	# OpenAI-compatible + Anthropic-compatible (/v1/messages) API -> LiteLLM
+	# Public API under /v1
 	handle /v1/* {
-		reverse_proxy litellm:4000 {
-			flush_interval -1
-			transport http {
-				read_timeout 15m
-				write_timeout 15m
+		# Realtime (WebSocket upgrade), the model list and audio translations -> backend: it serves the open-weight
+		# voice pipeline itself, relays provider realtime models to LiteLLM, adds pipeline models to /v1/models and runs
+		# translations as logged LiteLLM calls (LiteLLM has no /audio/translations route). Sessions may run long.
+		@gateway_v1 path /v1/realtime /v1/realtime/* /v1/models /v1/audio/translations
+		handle @gateway_v1 {
+			request_body {
+				max_size 26MB
+			}
+			reverse_proxy backend:8000 {
+				flush_interval -1
+				stream_timeout 4h
+				stream_close_delay 10s
+				transport http {
+					read_timeout 0
+					write_timeout 0
+				}
+			}
+		}
+		# Everything else (OpenAI-compatible + Anthropic /v1/messages) -> LiteLLM, incl. multipart
+		# /v1/audio/transcriptions + /translations uploads up to 25 MB and streamed /v1/audio/speech
+		handle {
+			request_body {
+				max_size 26MB
+			}
+			reverse_proxy litellm:4000 {
+				flush_interval -1
+				transport http {
+					read_timeout 15m
+					write_timeout 15m
+				}
 			}
 		}
 	}
 
-	# Control-plane API
+	# Control-plane API (incl. the Playground's realtime WebSocket relay /api/playground/realtime)
 	handle /api/* {
+		request_body {
+			max_size 26MB
+		}
 		reverse_proxy backend:8000 {
 			flush_interval -1
+			stream_timeout 4h
+			stream_close_delay 10s
 		}
 	}
 

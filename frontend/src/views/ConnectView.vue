@@ -7,6 +7,7 @@ import { fail } from '../stores/toast'
 import CodeBlock from '../components/CodeBlock.vue'
 import CopyButton from '../components/CopyButton.vue'
 import { buildSnippets } from '../snippets'
+import type { VoiceCtx } from '../snippets'
 
 const info = ref<ConnectInfo | null>(null)
 const keys = ref<ApiKey[]>([])
@@ -15,7 +16,7 @@ const keyId = ref<number | null>(null)
 const keyValue = ref('')
 const model = ref('default')
 const where = ref<'remote' | 'local'>('remote')
-const tab = ref('opencode')
+const tab = ref('malac')
 
 onMounted(async () => {
   try {
@@ -31,7 +32,15 @@ async function pickKey(id: number) {
 const openai = computed(() => (where.value === 'remote' ? info.value?.openai_base_url : info.value?.local_openai_base_url) || '')
 const anthropic = computed(() => (where.value === 'remote' ? info.value?.anthropic_base_url : info.value?.local_anthropic_base_url) || '')
 const allModels = computed(() => [...(info.value?.aliases || []), ...(info.value?.models || [])])
-const snippets = computed(() => buildSnippets({ openai: openai.value, anthropic: anthropic.value, key: keyValue.value || '<YOUR_GATEWAY_KEY>', model: model.value, models: allModels.value }))
+const voice = computed<VoiceCtx>(() => {
+  const live = aliases.value.filter((a) => a.live && a.target)
+  const find = (name: string, kind: string) => live.find((a) => a.name === name && a.target?.kind === kind) || live.find((a) => a.target?.kind === kind)
+  const stt = find('stt', 'transcription'), tts = find('tts', 'speech'), talk = find('talk', 'realtime')
+  const malacKind = (k: string) => (k === 'transcription' || k === 'speech' || k === 'realtime' || k === 'input' ? k : null)
+  const declare = live.filter((a) => malacKind(a.target!.kind)).map((a) => ({ name: a.name, audio: malacKind(a.target!.kind)! as 'transcription' }))
+  return { stt: stt?.name, tts: tts?.name, ttsVoice: tts?.target?.default_voice, talk: talk?.name, talkVoice: talk?.target?.default_voice, language: 'en', declare }
+})
+const snippets = computed(() => buildSnippets({ openai: openai.value, anthropic: anthropic.value, key: keyValue.value || '<YOUR_GATEWAY_KEY>', model: model.value, models: allModels.value, voice: voice.value }))
 </script>
 
 <template>
@@ -47,7 +56,7 @@ const snippets = computed(() => buildSnippets({ openai: openai.value, anthropic:
       <div class="card ep">
         <div class="eh"><Globe :size="16" /> OpenAI-compatible base URL</div>
         <div class="row"><code>{{ openai }}</code><CopyButton :text="openai" /></div>
-        <div class="muted small">/chat/completions · /completions · /embeddings · /models · /responses</div>
+        <div class="muted small">/chat/completions · /responses · /embeddings · /models · /audio/transcriptions · /audio/speech · /realtime (WebSocket)</div>
       </div>
       <div class="card ep">
         <div class="eh"><Globe :size="16" /> Anthropic-compatible base URL</div>

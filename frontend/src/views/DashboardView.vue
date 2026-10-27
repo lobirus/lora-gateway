@@ -3,7 +3,7 @@ import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { RefreshCw } from 'lucide-vue-next'
 import type { EChartsOption } from 'echarts'
 import { api, qs } from '../api'
-import type { BreakdownRow, Point, Summary } from '../types'
+import type { AudioSummary, BreakdownRow, Point, Summary } from '../types'
 import { delta, fmtCompact, fmtCost, fmtInt, fmtMs, fmtPct } from '../format'
 import { fail } from '../stores/toast'
 import { theme } from '../stores/theme'
@@ -22,6 +22,11 @@ const hours = ref(Number(localStorage.getItem('gw-range') || 168))
 watch(hours, (h) => localStorage.setItem('gw-range', String(h)))
 const source = ref(localStorage.getItem('gw-source') || '')
 watch(source, (s) => localStorage.setItem('gw-source', s))
+const rtype = ref(localStorage.getItem('gw-rtype') || '')
+watch(rtype, (s) => localStorage.setItem('gw-rtype', s))
+const audio = ref<AudioSummary | null>(null)
+const hasAudio = computed(() => !!audio.value && Object.values(audio.value.types).some((t) => t.requests > 0))
+const typeLabel: Record<string, string> = { '': 'All types', chat: 'Chat', audio: 'Audio', transcription: 'Transcription', speech: 'Speech', realtime: 'Realtime', embedding: 'Embedding' }
 const summary = ref<Summary | null>(null)
 const points = ref<Point[]>([])
 const byModel = ref<BreakdownRow[]>([])
@@ -35,15 +40,18 @@ let timer: number | undefined
 async function load() {
   loading.value = true
   try {
-    const q = qs({ hours: hours.value, source: source.value })
-    const [s, ts, m, p, k, src] = await Promise.all([
+    const base = { hours: hours.value, source: source.value, type: rtype.value }
+    const q = qs(base)
+    const [s, ts, m, p, k, src, au] = await Promise.all([
       api.get<Summary>('/api/analytics/summary' + q),
       api.get<{ points: Point[] }>('/api/analytics/timeseries' + q),
-      api.get<BreakdownRow[]>('/api/analytics/breakdown' + qs({ hours: hours.value, by: 'model', source: source.value })),
-      api.get<BreakdownRow[]>('/api/analytics/breakdown' + qs({ hours: hours.value, by: 'provider', source: source.value })),
-      api.get<BreakdownRow[]>('/api/analytics/breakdown' + qs({ hours: hours.value, by: 'key', source: source.value })),
-      api.get<BreakdownRow[]>('/api/analytics/breakdown' + qs({ hours: hours.value, by: 'source', source: source.value })),
+      api.get<BreakdownRow[]>('/api/analytics/breakdown' + qs({ ...base, by: 'model' })),
+      api.get<BreakdownRow[]>('/api/analytics/breakdown' + qs({ ...base, by: 'provider' })),
+      api.get<BreakdownRow[]>('/api/analytics/breakdown' + qs({ ...base, by: 'key' })),
+      api.get<BreakdownRow[]>('/api/analytics/breakdown' + qs({ ...base, by: 'source' })),
+      api.get<AudioSummary>('/api/analytics/audio' + qs({ hours: hours.value, source: source.value })),
     ])
+    audio.value = au
     summary.value = s
     points.value = ts.points
     byModel.value = m
@@ -58,7 +66,7 @@ async function load() {
 }
 onMounted(() => { load(); timer = window.setInterval(load, 30000) })
 onBeforeUnmount(() => clearInterval(timer))
-watch([hours, source], load)
+watch([hours, source, rtype], load)
 
 const tk = computed(() => chartTokens(theme.value))
 const palette = computed(() => tk.value.palette)
@@ -132,10 +140,13 @@ const rangeLabel = computed(() => ranges.find((r) => r.hours === hours.value)?.l
     <div class="page-header">
       <div>
         <h1>Dashboard</h1>
-        <p>Traffic, spend and performance across all providers · last {{ rangeLabel }}<template v-if="source"> · {{ sourceLabel[source] }} only</template></p>
+        <p>Traffic, spend and performance across all providers · last {{ rangeLabel }}<template v-if="source"> · {{ sourceLabel[source] }} only</template><template v-if="rtype"> · {{ typeLabel[rtype] }} requests</template></p>
       </div>
       <div class="toolbar">
-        <select v-model="source" class="input source-sel" title="Traffic source">
+        <select v-model="rtype" class="input source-sel" title="Request type" aria-label="Request type">
+          <option value="">All types</option><option value="chat">Chat</option><option value="audio">Audio</option><option value="transcription">Transcription</option><option value="speech">Speech</option><option value="realtime">Realtime</option>
+        </select>
+        <select v-model="source" class="input source-sel" title="Traffic source" aria-label="Traffic source">
           <option value="">All traffic</option><option value="api">API clients</option><option value="playground">Playground</option><option value="test">Model tests</option>
         </select>
         <div class="segmented">
@@ -152,6 +163,15 @@ const rangeLabel = computed(() => ranges.find((r) => r.hours === hours.value)?.l
       <StatCard label="Avg latency" :value="fmtMs(summary?.latency_avg)" :hint="`p50 ${fmtMs(summary?.latency_p50)} · p95 ${fmtMs(summary?.latency_p95)}`" :loading="loading && !summary" />
       <StatCard label="Time to first token" :value="fmtMs(summary?.ttft_p50)" hint="p50, streaming requests" :loading="loading && !summary" />
       <StatCard label="Error rate" :value="fmtPct(summary?.error_rate)" :hint="`${fmtInt(summary?.errors)} failed requests`" :loading="loading && !summary" />
+    </div>
+
+    <div v-if="hasAudio && audio" class="audio-strip">
+      <div class="as-h">Audio · last {{ rangeLabel }}</div>
+      <div class="as-i"><b class="tnum">{{ audio.minutes_transcribed.toFixed(1) }}</b><span>minutes transcribed · {{ fmtInt(audio.types.transcription.requests) }} req · {{ fmtCost(audio.types.transcription.cost) }}</span></div>
+      <div class="as-i"><b class="tnum">{{ fmtCompact(audio.characters_spoken) }}</b><span>characters spoken · {{ fmtInt(audio.types.speech.requests) }} req · {{ fmtCost(audio.types.speech.cost) }}</span></div>
+      <div class="as-i"><b class="tnum">{{ audio.realtime_minutes.toFixed(1) }}</b><span>realtime minutes · {{ fmtInt(audio.types.realtime.requests) }} sessions · {{ fmtCost(audio.types.realtime.cost) }}</span></div>
+      <div class="as-i"><b class="tnum">{{ fmtCost(audio.cost) }}</b><span>audio cost</span></div>
+      <RouterLink class="btn btn-sm" :to="{ name: 'logs', query: { type: 'audio' } }">Audio logs</RouterLink>
     </div>
 
     <div v-if="!loading && !hasData" class="card" style="margin-top: 18px">
@@ -239,6 +259,13 @@ const rangeLabel = computed(() => ranges.find((r) => r.hours === hours.value)?.l
 .pname { font-weight: 500; }
 .donut { padding: 6px; }
 .source-sel { width: auto; height: 32px; }
+.audio-strip { display: flex; align-items: center; gap: 0; margin-top: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-elev); flex-wrap: wrap; }
+.audio-strip > * { padding: 12px 16px; }
+.as-h { font-size: 12.5px; font-weight: 500; color: var(--text-2); min-width: 150px; }
+.as-i { display: flex; flex-direction: column; gap: 2px; border-left: 1px solid var(--border); flex: 1; min-width: 180px; }
+.as-i b { font-size: 18px; font-weight: 600; letter-spacing: -.01em; }
+.as-i span { font-size: 11.5px; color: var(--text-3); }
+.audio-strip .btn { margin: 0 14px 0 auto; padding: 0 10px; }
 @media (max-width: 1400px) {
   .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .stats > :deep(.stat:nth-child(3n + 1)) { border-left: 0; }

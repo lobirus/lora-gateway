@@ -46,6 +46,8 @@ services:
       LITELLM_LOG: "ERROR"
       DISABLE_ADMIN_UI: "True"
       LITELLM_TELEMETRY: "False"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # local OpenAI-compatible servers (Ollama etc.) on the host
     volumes:
       - ./litellm/config.yaml:/app/config.yaml:ro
     ports:

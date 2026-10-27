@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
-import { Plus, KeyRound, PlugZap, Loader2, Server, Pencil, Trash2, CheckCircle2, XCircle, Search } from 'lucide-vue-next'
+import { Plus, KeyRound, PlugZap, Loader2, Server, Pencil, Trash2, CheckCircle2, XCircle, Search, RefreshCw } from 'lucide-vue-next'
 import { api } from '../api'
 import type { Provider } from '../types'
-import { timeAgo } from '../format'
+import { fmtInt, timeAgo } from '../format'
 import { ok, fail, toast } from '../stores/toast'
 import Modal from '../components/Modal.vue'
 import Toggle from '../components/Toggle.vue'
@@ -17,9 +17,25 @@ const filter = ref('')
 // monochrome monograms; no brand colours
 const logos: Record<string, { t: string }> = {
   together: { t: 'Tg' }, zai: { t: 'Z' }, openrouter: { t: 'OR' },
-  anthropic: { t: 'A' }, openai: { t: 'O' }, xai: { t: 'x' }, openai_compatible: { t: '⇄' },
+  anthropic: { t: 'A' }, openai: { t: 'O' }, xai: { t: 'x' }, openai_compatible: { t: '⇄' }, groq: { t: 'Gq' }, mistral: { t: 'M' },
+  gemini: { t: 'G' }, deepseek: { t: 'DS' }, deepinfra: { t: 'DI' }, fireworks: { t: 'FW' }, cerebras: { t: 'Cb' }, sambanova: { t: 'SN' },
+  hyperbolic: { t: 'Hy' }, nebius: { t: 'Nb' }, novita: { t: 'Nv' }, baseten: { t: 'Bt' }, vercel: { t: 'V' }, pipeline: { t: '◖' }, local: { t: 'L' },
 }
-const kindLabel: Record<string, string> = { together: 'Together AI', zai: 'Z.ai', openrouter: 'OpenRouter', anthropic: 'Anthropic', openai: 'OpenAI', xai: 'xAI', openai_compatible: 'OpenAI-compatible' }
+const kindLabel: Record<string, string> = { together: 'Together AI', zai: 'Z.ai', openrouter: 'OpenRouter', anthropic: 'Anthropic', openai: 'OpenAI', xai: 'xAI',
+  groq: 'Groq', mistral: 'Mistral', gemini: 'Google Gemini (OpenAI-compatible)', deepseek: 'DeepSeek', deepinfra: 'DeepInfra', fireworks: 'Fireworks AI',
+  cerebras: 'Cerebras', sambanova: 'SambaNova', hyperbolic: 'Hyperbolic', nebius: 'Nebius AI Studio', novita: 'Novita AI', baseten: 'Baseten',
+  vercel: 'Vercel AI Gateway', openai_compatible: 'OpenAI-compatible', pipeline: 'Gateway voice pipeline' }
+async function syncModels(p: Provider) {
+  busy[p.id] = 'sync'
+  try {
+    const r = await api.post<{ ok: boolean; message?: string; error?: string }>(`/api/providers/${p.id}/sync`)
+    toast(r.ok ? 'success' : 'error', r.ok ? `${p.name} catalog synced` : `${p.name} sync failed`, r.message || r.error)
+    await load()
+  } catch (e) { fail('Sync failed', e) } finally { delete busy[p.id] }
+}
+async function setAutoSync(p: Provider, v: boolean) {
+  try { await api.patch(`/api/providers/${p.id}`, { auto_sync: v }); p.auto_sync = v } catch (e) { fail('Update failed', e) }
+}
 
 async function load() {
   try { providers.value = await api.get<Provider[]>('/api/providers') } catch (e) { fail('Could not load providers', e) } finally { loading.value = false }
@@ -32,7 +48,7 @@ function syncNote(s: { ok: boolean; error?: string; added?: string[]; removed?: 
 }
 
 async function toggle(p: Provider, v: boolean) {
-  if (v && !p.has_key) { openEdit(p); toast('info', 'Add an API key first', 'The provider will be enabled once a key is saved.'); return }
+  if (v && !p.has_key && p.kind !== 'pipeline') { openEdit(p); toast('info', 'Add an API key first', 'The provider will be enabled once a key is saved.'); return }
   busy[p.id] = 'toggle'
   try {
     const r = await api.patch<{ provider: Provider; sync: never }>(`/api/providers/${p.id}`, { enabled: v })
@@ -92,7 +108,10 @@ async function remove(p: Provider) {
   if (!confirm(`Delete provider ${p.name} and its ${p.model_count} models? This cannot be undone.`)) return
   try { await api.del(`/api/providers/${p.id}`); ok('Provider deleted'); await load() } catch (e) { fail('Delete failed', e) }
 }
-const defaultBase: Record<string, string> = { together: 'https://api.together.xyz/v1', openai: 'https://api.openai.com/v1', anthropic: 'https://api.anthropic.com', openrouter: 'https://openrouter.ai/api/v1', xai: 'https://api.x.ai/v1', zai: 'https://api.z.ai/api/paas/v4', openai_compatible: '' }
+const defaultBase: Record<string, string> = { together: 'https://api.together.xyz/v1', openai: 'https://api.openai.com/v1', anthropic: 'https://api.anthropic.com', openrouter: 'https://openrouter.ai/api/v1', xai: 'https://api.x.ai/v1', zai: 'https://api.z.ai/api/paas/v4',
+  groq: 'https://api.groq.com/openai/v1', mistral: 'https://api.mistral.ai/v1', gemini: 'https://generativelanguage.googleapis.com/v1beta/openai', deepseek: 'https://api.deepseek.com', deepinfra: 'https://api.deepinfra.com/v1/openai',
+  fireworks: 'https://api.fireworks.ai/inference/v1', cerebras: 'https://api.cerebras.ai/v1', sambanova: 'https://api.sambanova.ai/v1', hyperbolic: 'https://api.hyperbolic.xyz/v1', nebius: 'https://api.studio.nebius.com/v1',
+  novita: 'https://api.novita.ai/v3/openai', baseten: 'https://inference.baseten.co/v1', vercel: 'https://ai-gateway.vercel.sh/v1', openai_compatible: '' }
 </script>
 
 <template>
@@ -128,16 +147,24 @@ const defaultBase: Record<string, string> = { together: 'https://api.together.xy
             <span v-else class="badge"><span class="dot" />Disabled</span>
           </div>
           <div><span class="muted">API key</span><span class="mono">{{ p.key_masked || 'not set' }}</span></div>
-          <div><span class="muted">Models</span><span>{{ p.enabled_model_count }} / {{ p.model_count }} enabled</span></div>
+          <div><span class="muted">Models</span><span>{{ fmtInt(p.enabled_model_count) }} / {{ fmtInt(p.model_count) }} enabled<template v-if="p.synced_count"> · {{ fmtInt(p.synced_count) }} synced</template></span></div>
           <div><span class="muted">Last test</span>
             <span v-if="p.last_test_ok === true" class="ok"><CheckCircle2 :size="14" /> {{ timeAgo(p.last_test_at) }}</span>
             <span v-else-if="p.last_test_ok === false" class="bad" :title="p.last_test_msg || ''"><XCircle :size="14" /> failed {{ timeAgo(p.last_test_at) }}</span>
             <span v-else class="muted">never</span>
           </div>
+          <div v-if="p.can_sync" class="wide"><span class="muted">Catalog sync</span>
+            <span class="syncline">
+              <Toggle :model-value="p.auto_sync" :aria-label="'Daily catalog sync for ' + p.name" @update:model-value="(v: boolean) => setAutoSync(p, v)" />
+              <span v-if="p.last_sync_at" :class="p.last_sync_ok ? 'muted' : 'bad'" :title="p.last_sync_msg || ''">{{ p.last_sync_ok ? '' : 'failed · ' }}{{ timeAgo(p.last_sync_at) }} · {{ p.last_sync_msg }}</span>
+              <span v-else class="muted">{{ p.auto_sync ? 'daily, and as soon as a key is added' : 'off' }}</span>
+            </span>
+          </div>
         </div>
         <div class="actions">
-          <button class="btn btn-sm" @click="openEdit(p)"><KeyRound /> {{ p.has_key ? 'Edit' : 'Add key' }}</button>
-          <button class="btn btn-sm" :disabled="!p.has_key || !!busy[p.id]" @click="test(p)"><Loader2 v-if="busy[p.id] === 'test'" class="spin" /><PlugZap v-else /> Test</button>
+          <button class="btn btn-sm" @click="openEdit(p)"><KeyRound /> {{ p.has_key || p.kind === 'pipeline' ? 'Edit' : 'Add key' }}</button>
+          <button v-if="p.kind !== 'pipeline'" class="btn btn-sm" :disabled="!p.has_key || !!busy[p.id]" @click="test(p)"><Loader2 v-if="busy[p.id] === 'test'" class="spin" /><PlugZap v-else /> Test</button>
+          <button v-if="p.can_sync" class="btn btn-sm" :disabled="!p.has_key || !!busy[p.id]" title="Import every model this provider serves, with prices" @click="syncModels(p)"><Loader2 v-if="busy[p.id] === 'sync'" class="spin" /><RefreshCw v-else /> Sync models</button>
           <RouterLink class="btn btn-sm btn-ghost" :to="{ name: 'models', query: { provider: p.slug } }">Models</RouterLink>
           <span class="spacer" />
           <button class="btn btn-sm btn-ghost btn-icon" title="Delete provider" :aria-label="'Delete provider ' + p.name" @click="remove(p)"><Trash2 /></button>
@@ -193,7 +220,10 @@ const defaultBase: Record<string, string> = { together: 'https://api.together.xy
 .facts .muted { font-size: 12px; }
 .ok { color: var(--success); display: inline-flex; gap: 4px; align-items: center; }
 .bad { color: var(--danger); display: inline-flex; gap: 4px; align-items: center; cursor: help; }
-.actions { display: flex; gap: 6px; align-items: center; }
+.actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.facts > .wide { grid-column: 1 / -1; }
+.syncline { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; }
+.syncline span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
 .search { position: relative; }
 .search svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); pointer-events: none; color: var(--text-3); }
 .search .input { padding-left: 32px; width: 220px; }
